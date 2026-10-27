@@ -1,0 +1,32 @@
+{
+  "template_name": "cover_template.docx",
+  "designers_marker": "设计人员名单",
+  "first_table_row_height_cm": 0.5,
+  "document_types": {
+    "1": { "primary": "初步设计", "secondary": "" },
+    "2": { "primary": "可行性研究", "secondary": "" },
+    "3": { "primary": "初步设计", "secondary": "（代可研）" },
+    "4": { "primary": "可行性研究", "secondary": "（代初设）" }
+  },
+  "stage_primary_variants": ["初步设计", "可行性研究"],
+  "stage_secondary_variants": ["（代可研）", "（代初设）"],
+  "field_placeholders": {
+    "project_name": "高性能、安全、环保的磷酸亚铁锂电池材料项目",
+    "date": "2024年4月",
+    "library_number": "10032357ARPD01AK008"
+  },
+  "metadata": {
+    "merge_company_prefix": true,
+    "company_suffix_pattern": "(公司|集团|厂|研究院|设计院|中心)$",
+    "project_name_suffix": "项目",
+    "date_year_month_day_pattern": "(\\d{4}年\\d{1,2}月\\d{1,2}[日号]|\\d{4}-\\d{1,2}-\\d{1,2}|\\d{4}/\\d{1,2}/\\d{1,2})",
+    "date_year_month_pattern": "(\\d{4}年\\d{1,2}月)",
+    "library_number_pattern": "库号[:：]\\s*(\\S+)",
+    "personnel_role_keywords": ["主管领导", "副总工程师", "总设计师", "总经理", "经理", "主任", "工程师"],
+    "design_filter_keywords": ["可行性研究", "初步设计", "代初步", "代可研", "代可行"]
+  },
+  "format": {
+    "title_spacing_keywords": ["初步设计", "可行性研究"],
+    "character_spacing_pt": 7.0
+  }
+}

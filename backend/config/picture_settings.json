@@ -1,0 +1,15 @@
+{
+  "picture_format": {
+    "alignment": "center",
+    "line_spacing": 1.0,
+    "before_spacing": 0,
+    "after_spacing": 0,
+    "keep_with_next": false,
+    "keep_lines": false,
+    "picture_width": null,
+    "picture_height": null,
+    "wrap_type": "inline",
+    "skip_cover": true,
+    "description": "正文图片段落格式；skip_cover 表示封面图片不参与处理"
+  }
+}

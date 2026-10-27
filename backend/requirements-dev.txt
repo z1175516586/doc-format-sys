@@ -1,0 +1,8 @@
+# 高阶智能文档排版系统 - 后端开发与测试依赖
+#
+# 安装：pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+-r requirements.txt
+
+pytest==9.1.1
+httpx==0.28.1

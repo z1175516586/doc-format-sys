@@ -1,0 +1,512 @@
+"""文档拆分与合并。
+
+对应原 utils/docx_split.py、utils/merge_docx_without_com.py、
+utils/merge_docs_preserve_orientation.py、service/converter.py 的 step1/step4。
+
+原实现的两处关键缺陷在这里被修掉：
+1. merge_docx_without_com 直接 deepcopy 正文元素，**没有重映射关系 ID**，
+   被追加文档中的图片/页眉引用会指向错误目标（跨文档合并时图片丢失）。
+   这里新增 RelationshipRemapper，按部件内容去重后重建关系。
+2. merge_docs_preserve_orientation 依赖 COM 的 InsertFile/InsertBreak，
+   只能在 Windows 运行。这里全部用 OOXML 结构操作完成。
+"""
+
+from __future__ import annotations
+
+import posixpath
+from copy import deepcopy
+from dataclasses import dataclass, field
+
+from lxml import etree
+
+from app.core.constants import layout_rules
+from app.core.errors import LayoutError
+from app.core.logging import get_logger
+from app.core.namespaces import PART_CONTENT_TYPES, PART_DOCUMENT, PART_DOCUMENT_RELS, PART_STYLES, R, qn, w_attr
+from app.domain.ooxml.package import DocxPackage, paragraph_text
+from app.domain.ooxml.styles import StyleResolver
+
+logger = get_logger(__name__)
+
+_XML_SPACE = qn("xml:space")
+
+# 关系类型中需要随文档一起迁移的内部部件
+_RELOCATABLE_TYPES = (
+    "image",
+    "header",
+    "footer",
+    "footnotes",
+    "endnotes",
+    "hyperlink",
+)
+
+
+@dataclass
+class SplitResult:
+    """拆分结果：封面包与正文包。"""
+
+    cover: DocxPackage
+    content: DocxPackage
+    project_name: str | None = None
+    split_reason: str = ""
+
+
+class DocumentSplitter:
+    """把源文档拆成"封面/目录前"与"正文"两个包。"""
+
+    def __init__(self, pkg: DocxPackage) -> None:
+        self.pkg = pkg
+
+    # ------------------------------------------------------------------
+    def split(self) -> SplitResult:
+        body = self.pkg.body
+        children = list(body)
+
+        toc_keywords = {kw.strip() for kw in layout_rules()["toc"]["keywords"]}
+        toc_index = self._find_toc_index(children, toc_keywords)
+        content_start = self._find_content_start(children, toc_index + 1 if toc_index >= 0 else 0)
+
+        if content_start is None:
+            raise LayoutError("无法定位正文起始位置，文档结构不符合排版要求")
+
+        cover = self.pkg.clone()
+        content = self.pkg.clone()
+
+        self._truncate_after(cover, content_start)
+        self._truncate_before(content, content_start)
+
+        reason = "toc" if toc_index >= 0 else "first_heading"
+        project_name = self._guess_project_name(cover)
+
+        logger.info(
+            "文档拆分完成: 目录位置=%s, 正文起始=%d, 依据=%s",
+            toc_index,
+            content_start,
+            reason,
+        )
+        return SplitResult(
+            cover=cover,
+            content=content,
+            project_name=project_name,
+            split_reason=reason,
+        )
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _find_toc_index(children: list[etree._Element], keywords: set[str]) -> int:
+        for index, child in enumerate(children):
+            if child.tag != qn("w:p"):
+                continue
+            if paragraph_text(child) in keywords:
+                return index
+        return -1
+
+    def _find_content_start(self, children: list[etree._Element], start: int) -> int | None:
+        """从 start 起找第一个真正的正文标题段落。"""
+        resolver = StyleResolver(self.pkg)
+
+        for index in range(start, len(children)):
+            child = children[index]
+            if child.tag != qn("w:p"):
+                continue
+            style_el = child.find(f"{qn('w:pPr')}/{qn('w:pStyle')}")
+            if style_el is None:
+                continue
+            if resolver.is_heading(style_el.get(w_attr("val")) or ""):
+                return index
+
+        # 退路：第一个非空且带编号特征的段落（标题识别未命中时）
+        for index in range(start, len(children)):
+            child = children[index]
+            if child.tag != qn("w:p"):
+                continue
+            text = paragraph_text(child)
+            if text and text[0].isdigit():
+                return index
+        return None
+
+    @staticmethod
+    def _truncate_after(pkg: DocxPackage, keep_count: int) -> None:
+        """只保留前 keep_count 个 body 子元素，末尾 sectPr 保留。"""
+        body = pkg.body
+        children = list(body)
+        sect_pr = children[-1] if children and children[-1].tag == qn("w:sectPr") else None
+
+        for child in children[keep_count:]:
+            if child is sect_pr:
+                continue
+            body.remove(child)
+
+        if sect_pr is not None and sect_pr.getparent() is None:
+            body.append(sect_pr)
+
+    @staticmethod
+    def _truncate_before(pkg: DocxPackage, start: int) -> None:
+        """删除前 start 个 body 子元素，末尾 sectPr 保留。"""
+        body = pkg.body
+        children = list(body)
+        sect_pr = children[-1] if children and children[-1].tag == qn("w:sectPr") else None
+
+        for child in children[:start]:
+            body.remove(child)
+
+        if sect_pr is not None and sect_pr.getparent() is None:
+            body.append(sect_pr)
+
+    @staticmethod
+    def _guess_project_name(cover: DocxPackage) -> str | None:
+        """从封面文本中猜测项目名称（尽力而为，不作为失败条件）。"""
+        candidates: list[str] = []
+        for paragraph in cover.paragraphs():
+            text = paragraph_text(paragraph)
+            if not text or len(text) < 4:
+                continue
+            candidates.append(text)
+
+        for text in candidates:
+            if "项目" in text:
+                return text
+        return candidates[0] if candidates else None
+
+
+# ======================================================================
+# 关系重映射
+# ======================================================================
+@dataclass
+class _RelEntry:
+    rel_id: str
+    rel_type: str
+    target: str
+    external: bool
+
+
+class RelationshipRemapper:
+    """把来源文档的关系迁移到目标文档，返回 old_id -> new_id 映射。
+
+    这是合并正确性的关键：rId 只在单个文档内唯一，
+    跨文档直接拼接会让图片、页眉、超链接指向错误目标。
+    """
+
+    def __init__(
+        self,
+        base: DocxPackage,
+        source: DocxPackage,
+        only_types: tuple[str, ...] | None = None,
+    ) -> None:
+        """only_types 用于只迁移关心的关系类型。
+
+        封面设计人员表移植时只需要 image（表内可能嵌图），
+        全量迁移会把页眉页脚等无干部件一起搬过来。
+        """
+        self.base = base
+        self.source = source
+        self._only_types = only_types
+        self._counter = self._max_existing_id()
+        self.mapping: dict[str, str] = {}
+
+    def _max_existing_id(self) -> int:
+        highest = 0
+        for rel in self._iter_base_rels():
+            rel_id = rel.get("Id") or ""
+            digits = "".join(ch for ch in rel_id if ch.isdigit())
+            if digits:
+                highest = max(highest, int(digits))
+        return highest
+
+    def _iter_base_rels(self):
+        if not self.base.has(PART_DOCUMENT_RELS):
+            return []
+        root = self.base.xml(PART_DOCUMENT_RELS)
+        return root.findall(qn("pr:Relationship"))
+
+    def _next_id(self) -> str:
+        self._counter += 1
+        return f"rId{self._counter}"
+
+    # ------------------------------------------------------------------
+    def remap(self) -> dict[str, str]:
+        entries = self._read_source_rels()
+        if not entries:
+            return {}
+
+        base_rels_root = self._ensure_base_rels_root()
+
+        for entry in entries:
+            if self._only_types is not None and not any(
+                allowed in entry.rel_type for allowed in self._only_types
+            ):
+                continue
+
+            new_id = self._next_id()
+
+            if entry.external:
+                self._append_rel(base_rels_root, new_id, entry.rel_type, entry.target, external=True)
+                self.mapping[entry.rel_id] = new_id
+                continue
+
+            if not self._should_relocate(entry.rel_type):
+                continue
+
+            source_part = self._resolve_part_name(entry.target)
+            if not self.source.has(source_part):
+                logger.debug("跳过悬空关系: %s -> %s", entry.rel_id, source_part)
+                continue
+
+            data = self.source.read(source_part)
+            target_part = self._ensure_target_part(source_part, data)
+            relative_target = posixpath.relpath(target_part, "word")
+            self._append_rel(base_rels_root, new_id, entry.rel_type, relative_target)
+            self.mapping[entry.rel_id] = new_id
+
+        if self.mapping:
+            logger.info("迁移 %d 条文档关系", len(self.mapping))
+        return self.mapping
+
+    @staticmethod
+    def _should_relocate(rel_type: str) -> bool:
+        return any(key in rel_type for key in _RELOCATABLE_TYPES)
+
+    @staticmethod
+    def _resolve_part_name(target: str) -> str:
+        """document.xml.rels 中的 Target 相对于 word/。"""
+        if target.startswith("/"):
+            return target.lstrip("/")
+        return posixpath.normpath(posixpath.join("word", target))
+
+    def _read_source_rels(self) -> list[_RelEntry]:
+        if not self.source.has(PART_DOCUMENT_RELS):
+            return []
+        root = self.source.xml(PART_DOCUMENT_RELS)
+        entries: list[_RelEntry] = []
+        for rel in root.findall(qn("pr:Relationship")):
+            rel_id = rel.get("Id")
+            if not rel_id:
+                continue
+            entries.append(
+                _RelEntry(
+                    rel_id=rel_id,
+                    rel_type=rel.get("Type") or "",
+                    target=rel.get("Target") or "",
+                    external=(rel.get("TargetMode") or "") == "External",
+                )
+            )
+        return entries
+
+    def _ensure_base_rels_root(self) -> etree._Element:
+        if self.base.has(PART_DOCUMENT_RELS):
+            return self.base.xml(PART_DOCUMENT_RELS)
+
+        root = etree.Element(qn("pr:Relationships"), nsmap={None: "http://schemas.openxmlformats.org/package/2006/relationships"})
+        self.base.add_part(PART_DOCUMENT_RELS, etree.tostring(root, xml_declaration=True, encoding="UTF-8"))
+        return self.base.xml(PART_DOCUMENT_RELS)
+
+    @staticmethod
+    def _append_rel(
+        root: etree._Element,
+        rel_id: str,
+        rel_type: str,
+        target: str,
+        *,
+        external: bool = False,
+    ) -> None:
+        rel = etree.SubElement(root, qn("pr:Relationship"))
+        rel.set("Id", rel_id)
+        rel.set("Type", rel_type)
+        rel.set("Target", target)
+        if external:
+            rel.set("TargetMode", "External")
+
+    def _ensure_target_part(self, source_part: str, data: bytes) -> str:
+        """若内容已存在则复用，否则复制到不冲突的新路径。"""
+        if self.base.has(source_part) and self.base.read(source_part) == data:
+            return source_part
+
+        candidate = source_part
+        if self.base.has(candidate):
+            stem, dot, ext = source_part.rpartition(".")
+            directory = posixpath.dirname(source_part)
+            index = 1
+            while True:
+                candidate = f"{stem}_{index}{dot}{ext}" if dot else f"{source_part}_{index}"
+                if directory:
+                    candidate = posixpath.join(directory, posixpath.basename(candidate))
+                if not self.base.has(candidate):
+                    break
+                index += 1
+
+        self.base.add_part(candidate, data)
+        self._ensure_content_type(candidate)
+        return candidate
+
+    def _ensure_content_type(self, part_name: str) -> None:
+        """确保 [Content_Types].xml 声明了该扩展名。"""
+        if not self.base.has(PART_CONTENT_TYPES):
+            return
+        _, dot, ext = part_name.rpartition(".")
+        if not dot:
+            return
+        ext = ext.lower()
+
+        root = self.base.xml(PART_CONTENT_TYPES)
+        for default in root.findall(qn("ct:Default")):
+            if (default.get("Extension") or "").lower() == ext:
+                return
+
+        default = etree.SubElement(root, qn("ct:Default"))
+        default.set("Extension", ext)
+        default.set("ContentType", _CONTENT_TYPE_BY_EXT.get(ext, "application/octet-stream"))
+
+
+_CONTENT_TYPE_BY_EXT = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "bmp": "image/bmp",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+    "emf": "image/x-emf",
+    "wmf": "image/x-wmf",
+    "svg": "image/svg+xml",
+    "xml": "application/xml",
+}
+
+
+def rewrite_relationship_ids(elements: list[etree._Element], mapping: dict[str, str]) -> int:
+    """把元素树中 r: 命名空间下的 ID 属性替换为新 ID。"""
+    if not mapping:
+        return 0
+
+    rewritten = 0
+    rel_attrs = (
+        f"{{{R}}}embed",
+        f"{{{R}}}id",
+        f"{{{R}}}link",
+        f"{{{R}}}pict",
+        f"{{{R}}}href",
+    )
+
+    for root in elements:
+        for node in root.iter():
+            for attr in rel_attrs:
+                value = node.get(attr)
+                if value and value in mapping:
+                    node.set(attr, mapping[value])
+                    rewritten += 1
+    return rewritten
+
+
+# ======================================================================
+# 合并
+# ======================================================================
+@dataclass
+class MergeReport:
+    appended_body_elements: int = 0
+    remapped_relationships: int = 0
+    rewritten_references: int = 0
+    merged_styles: int = 0
+    base_sections: int = 0
+    final_sections: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+
+class DocumentMerger:
+    """把若干文档追加到基础文档末尾，每份追加内容独立成节。"""
+
+    def __init__(self, base: DocxPackage) -> None:
+        self.base = base
+
+    def append(self, source: DocxPackage) -> MergeReport:
+        report = MergeReport()
+
+        remapper = RelationshipRemapper(self.base, source)
+        mapping = remapper.remap()
+        report.remapped_relationships = len(mapping)
+
+        # 0. 先合并样式：content 引用的 pStyle 必须能在合并后的 styles.xml 中解析。
+        #    封面包与正文包样式表不同，若不合并会出现"引用了未定义的段落样式"。
+        report.merged_styles = self._merge_styles(source)
+
+        base_body = self.base.body
+        source_body = source.body
+
+        base_sections = len(self.base.section_properties())
+        report.base_sections = base_sections
+
+        # 1. 把 base 的末尾 sectPr 转成"段落级节属性"，形成分节
+        self._demote_trailing_section_properties(base_body)
+
+        # 2. 追加 source 正文（不含其末尾 sectPr）
+        appended = 0
+        for child in list(source_body):
+            if child.tag == qn("w:sectPr"):
+                continue
+            cloned = deepcopy(child)
+            base_body.append(cloned)
+            appended += 1
+        report.appended_body_elements = appended
+
+        # 3. 把 source 的末尾 sectPr 作为整篇的新结束节属性
+        source_sect = source_body.find(qn("w:sectPr"))
+        if source_sect is not None:
+            base_body.append(deepcopy(source_sect))
+        else:
+            report.warnings.append("被追加文档缺少末尾 sectPr，页面设置可能沿用前一节")
+
+        # 4. 重写所有 r:id 引用
+        report.rewritten_references = rewrite_relationship_ids(
+            [base_body],
+            mapping,
+        )
+
+        report.final_sections = len(self.base.section_properties())
+        logger.info(
+            "合并完成: 追加 %d 个元素, 迁移关系 %d 条, 节数 %d -> %d",
+            appended,
+            len(mapping),
+            report.base_sections,
+            report.final_sections,
+        )
+        return report
+
+    # ------------------------------------------------------------------
+    def _merge_styles(self, source: DocxPackage) -> int:
+        """把 source 的样式并入 base 的 styles.xml（缺 styleId 才补）。
+
+        content 与封面模板的样式表不同，不合并会导致正文引用的
+        pStyle 悬空（例如源文档用 a/a0/a1/Normal 这些 WPS 自定义样式）。
+        """
+        if not self.base.has(PART_STYLES) or not source.has(PART_STYLES):
+            return 0
+
+        base_root = self.base.xml(PART_STYLES)
+        known = {
+            style.get(w_attr("styleId"))
+            for style in base_root.findall(qn("w:style"))
+        }
+
+        source_root = source.xml(PART_STYLES)
+        merged = 0
+        for style in source_root.findall(qn("w:style")):
+            style_id = style.get(w_attr("styleId"))
+            if not style_id or style_id in known:
+                continue
+            base_root.append(deepcopy(style))
+            known.add(style_id)
+            merged += 1
+
+        if merged:
+            logger.info("合并样式 %d 条", merged)
+        return merged
+
+    @staticmethod
+    def _demote_trailing_section_properties(body: etree._Element) -> None:
+        """把 body 末尾的 w:sectPr 包进 w:p/w:pPr，使其成为分节符。"""
+        last = body[-1] if len(body) else None
+        if last is None or last.tag != qn("w:sectPr"):
+            return
+
+        body.remove(last)
+        paragraph = etree.SubElement(body, qn("w:p"))
+        ppr = etree.SubElement(paragraph, qn("w:pPr"))
+        ppr.append(last)

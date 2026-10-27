@@ -1,0 +1,35 @@
+{
+  "fonts": {
+    "table_default": {
+      "east_asia": "宋体",
+      "ascii": "宋体",
+      "size_pt": 14.0,
+      "description": "正文表格字体：宋体四号"
+    },
+    "table_cover": {
+      "east_asia": "宋体",
+      "ascii": "宋体",
+      "size_pt": 9.0,
+      "description": "封面表格字体：宋体小五"
+    }
+  },
+  "toc": {
+    "default_title": "目      录",
+    "keywords": ["目录", "目 录", "目      录", "Contents", "TABLE OF CONTENTS", "CONTENTS"],
+    "levels": "1-3",
+    "description": "目录标题与识别关键词，levels 控制纳入目录的标题层级"
+  },
+  "cover": {
+    "description": "封面规则已迁移至 backend/config/cover_config.json（模板与配置的单一来源）"
+  },
+  "headings": {
+    "max_level": 4,
+    "style_name_template": "Heading {level}",
+    "space_before_pt": 0.0,
+    "space_after_pt": 0.0
+  },
+  "output": {
+    "filename_datetime_format": "%y%m%d%H%M%S",
+    "allow_chinese_suffix": true
+  }
+}
