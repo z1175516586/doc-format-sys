@@ -24,8 +24,14 @@ from app.converters.base import DocConverter
 from app.converters.registry import get_converter
 from app.core.config import get_settings
 from app.core.constants import cover_config, layout_rules
-from app.core.errors import AppError, LayoutError, UnsupportedFormatError
+from app.core.errors import (
+    AppError,
+    DocumentValidationError,
+    LayoutError,
+    UnsupportedFormatError,
+)
 from app.core.logging import get_logger
+from app.domain.ooxml.conformance import DocumentValidator
 from app.domain.ooxml.document import DocumentMerger, DocumentSplitter
 from app.domain.ooxml.header_footer import HeaderFooterProcessor
 from app.domain.ooxml.headings import HeadingProcessor
@@ -56,6 +62,7 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # 步骤清单：顺序即执行顺序，名称对前端可见，改动需同步文档
 PIPELINE_STEPS: tuple[str, ...] = (
     "open",
+    "precheck",
     "repair",
     "numbering",
     "orientation",
@@ -64,6 +71,7 @@ PIPELINE_STEPS: tuple[str, ...] = (
     "template",
     "toc_cleanup",
     "headings",
+    "conformance",
     "split",
     "cover",
     "content",
@@ -96,6 +104,8 @@ class _PipelineState:
     project_name: str | None = None
     cover_section_count: int = 0
     warnings: list[str] = field(default_factory=list)
+    issues: list[dict[str, object]] = field(default_factory=list)
+    heading_report: object | None = None
 
 
 class DocumentFormatService:
@@ -148,6 +158,7 @@ class DocumentFormatService:
                     success=False,
                     steps=reports,
                     warnings=state.warnings,
+                    issues=state.issues,
                     engine=self.converter.capabilities().name,
                     duration_ms=int((time.perf_counter() - started) * 1000),
                     message=f"{step_name} 失败：{exc.message}",
@@ -177,6 +188,7 @@ class DocumentFormatService:
             output_path=str(state.output_path),
             steps=reports,
             warnings=state.warnings,
+            issues=state.issues,
             engine=self.converter.capabilities().name,
             duration_ms=int((time.perf_counter() - started) * 1000),
             message="文档排版完成",
@@ -228,6 +240,51 @@ class DocumentFormatService:
             "paragraphs": len(state.package.paragraphs()),
             "tables": len(state.package.tables()),
         }
+
+    def _step_precheck(self, state: _PipelineState) -> dict[str, object]:
+        """封面文档类型前置校验：不规范就拒绝，绝不带着错往下走。"""
+        if not state.options.use_cover_template:
+            return {"skipped": True}
+        issues = DocumentValidator(self._pkg(state)).check_document_type(
+            str(state.options.document_type)
+        )
+        return self._report_issues(state, issues, label="封面文档类型")
+
+    def _step_conformance(self, state: _PipelineState) -> dict[str, object]:
+        """标题编号规范校验：格式不规范或同级跳号即终止转换。
+
+        复用 headings 步骤的真实判定结果，避免另写一套识别逻辑造成误报。
+        """
+        if not state.options.convert_numbering:
+            return {"skipped": True, "reason": "numbering_not_converted"}
+        if state.heading_report is None:
+            return {"skipped": True, "reason": "no_heading_report"}
+        issues = DocumentValidator(self._pkg(state)).collect_heading_issues(
+            state.heading_report
+        )
+        return self._report_issues(state, issues, label="标题编号")
+
+    @staticmethod
+    def _report_issues(
+        state: _PipelineState,
+        issues,
+        *,
+        label: str,
+    ) -> dict[str, object]:
+        """汇总问题：warning 进提示，error 直接终止并带上完整清单。"""
+        payload = [item.to_dict() for item in issues]
+        state.issues.extend(payload)
+        for item in issues:
+            if item.severity == "warning":
+                state.warnings.append(item.message)
+
+        errors = [item for item in issues if item.severity == "error"]
+        if not errors:
+            return {"issues": payload}
+
+        preview = "；".join(item.message for item in errors[:3])
+        suffix = f"（共 {len(errors)} 处）" if len(errors) > 3 else ""
+        raise DocumentValidationError(f"{label}不符合规范：{preview}{suffix}", detail=payload)
 
     def _convert_doc_to_docx(self, source: Path) -> Path:
         """老 .doc 格式必须经由排版引擎转换，纯库无法处理二进制 doc。"""
@@ -293,6 +350,7 @@ class DocumentFormatService:
         - 之前拆分：拆分要靠标题样式定位正文起点
         """
         report = HeadingProcessor(self._pkg(state)).apply_heading_styles()
+        state.heading_report = report
         if report.detected == 0:
             state.warnings.append(
                 "未识别到正文标题：目录可能为空，且分节定位会回落到编号文本推断"
@@ -488,6 +546,8 @@ class DocumentFormatService:
                 strip_toc_leading_tabs(state.output_path)
         finally:
             backup.unlink(missing_ok=True)
+            # 引擎会把右对齐定位符改成普通制表符，并保留页脚环绕，这里按成品再校正一次。
+            self._polish_saved_chrome(state)
         if not refreshed:
             state.warnings.append("域刷新未成功，目录页码可能仍是占位内容")
         return {"refreshed": refreshed}
@@ -515,6 +575,15 @@ class DocumentFormatService:
         left = (state.project_name or "").replace("\n", "")
         right = _document_type_label(state.options.document_type)
         self.templates.fill_header_slots(pkg, left, right)
+        self.templates.polish_header_footer(pkg, state.cover_section_count)
+
+    def _polish_saved_chrome(self, state: _PipelineState) -> None:
+        """引擎改写文件之后，再把页眉页脚校正写回成品。"""
+        if not state.options.apply_template or not state.output_path.is_file():
+            return
+        with DocxPackage.open(state.output_path) as pkg:
+            self.templates.polish_header_footer(pkg, state.cover_section_count)
+            pkg.save(state.output_path)
 
     def _step_validate(self, state: _PipelineState) -> dict[str, object]:
         """输出结构断言：不通过即判定失败，绝不静默交付坏文档。"""

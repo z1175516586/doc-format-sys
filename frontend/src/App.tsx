@@ -38,7 +38,7 @@ import {
 } from "./api/client";
 import { AppIcon } from "./components/AppIcon";
 import { ACCEPTED_EXTENSIONS, API, APP_TITLE, DOCUMENT_TYPES, NOTICES, STEP_LABELS, TOC_TITLE } from "./constants/app";
-import type { EngineInfo, HistoryRecord, TemplateInfo } from "./types";
+import type { EngineInfo, HistoryRecord, TemplateInfo, ValidationIssue } from "./types";
 
 const { Header, Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
@@ -66,6 +66,7 @@ export default function App() {
   const [downloadUrl, setDownloadUrl] = useState("");
   const [outputName, setOutputName] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [issues, setIssues] = useState<ValidationIssue[]>([]);
 
   useEffect(() => {
     fetchEngine().then(setEngine).catch(() => setEngine(null));
@@ -95,6 +96,7 @@ export default function App() {
     setDownloadUrl("");
     setOutputName("");
     setWarnings([]);
+    setIssues([]);
   }
 
   async function onConvert() {
@@ -145,6 +147,7 @@ export default function App() {
 
       const detail = await fetchTask(taskId);
       setWarnings(detail.warnings ?? []);
+      setIssues(detail.error?.issues ?? []);
       if (detail.state === "failed") {
         message.error(detail.error?.message || detail.message || "转换失败");
         setDownloadUrl("");
@@ -273,6 +276,29 @@ export default function App() {
                 </Button>
                 {running || percent > 0 ? <Progress percent={percent} status={downloadUrl ? "success" : "active"} /> : null}
               </Space>
+
+              {issues.some((item) => item.severity === "error") ? (
+                <Alert
+                  style={{ marginTop: 16 }}
+                  type="error"
+                  showIcon
+                  icon={<AppIcon icon={CircleAlert} />}
+                  message="文档不符合排版规范，转换已终止"
+                  description={
+                    <Space direction="vertical" size={4}>
+                      {issues.map((item, index) => (
+                        <Text
+                          key={`${item.code}-${index}`}
+                          type={item.severity === "error" ? "danger" : "warning"}
+                        >
+                          {item.location ? `${item.location}：` : ""}
+                          {item.message}
+                        </Text>
+                      ))}
+                    </Space>
+                  }
+                />
+              ) : null}
 
               {downloadUrl ? (
                 <Alert

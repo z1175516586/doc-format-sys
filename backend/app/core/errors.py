@@ -49,6 +49,24 @@ class LayoutError(AppError):
     message = "文档排版处理失败"
 
 
+class DocumentValidationError(AppError):
+    """源文档不符合排版规范，拒绝转换，避免输出错文档。
+
+    detail 里带问题清单（severity / code / message / location），前端逐条标红。
+    """
+
+    code = "document_invalid"
+    http_status = 422
+    message = "文档不符合排版规范"
+
+    def __init__(self, message: str | None = None, *, detail: object = None) -> None:
+        super().__init__(message, detail=detail)
+
+    @property
+    def issues(self) -> list[dict]:
+        return self.detail if isinstance(self.detail, list) else []
+
+
 class EngineUnavailableError(AppError):
     code = "engine_unavailable"
     http_status = 503

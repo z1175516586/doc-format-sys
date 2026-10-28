@@ -18,10 +18,12 @@
   "metadata": {
     "merge_company_prefix": true,
     "company_suffix_pattern": "(公司|集团|厂|研究院|设计院|中心)$",
-    "project_name_suffix": "项目",
+    "project_name_suffixes": ["项目", "工程", "改造", "总承包", "总承包工程", "技改", "建设"],
+    "title_window": 4,
+    "min_title_length": 4,
     "date_year_month_day_pattern": "(\\d{4}年\\d{1,2}月\\d{1,2}[日号]|\\d{4}-\\d{1,2}-\\d{1,2}|\\d{4}/\\d{1,2}/\\d{1,2})",
     "date_year_month_pattern": "(\\d{4}年\\d{1,2}月)",
-    "library_number_pattern": "库号[:：]\\s*(\\S+)",
+    "library_number_pattern": "库号[:：]\\s*([A-Za-z0-9\\-_]+)",
     "personnel_role_keywords": ["主管领导", "副总工程师", "总设计师", "总经理", "经理", "主任", "工程师"],
     "design_filter_keywords": ["可行性研究", "初步设计", "代初步", "代可研", "代可行"]
   },

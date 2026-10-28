@@ -14,6 +14,7 @@ utils/merge_docs_preserve_orientation.py、service/converter.py 的 step1/step4�
 from __future__ import annotations
 
 import posixpath
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 
@@ -95,10 +96,11 @@ class DocumentSplitter:
     # ------------------------------------------------------------------
     @staticmethod
     def _find_toc_index(children: list[etree._Element], keywords: set[str]) -> int:
+        normalized = {re.sub(r"\s+", "", item) for item in keywords}
         for index, child in enumerate(children):
             if child.tag != qn("w:p"):
                 continue
-            if paragraph_text(child) in keywords:
+            if re.sub(r"\s+", "", paragraph_text(child)) in normalized:
                 return index
         return -1
 

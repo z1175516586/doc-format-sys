@@ -35,6 +35,14 @@ export interface ProgressEvent {
   data?: { download_url?: string; output_name?: string; code?: string } | null;
 }
 
+export interface ValidationIssue {
+  severity: "error" | "warning" | "off" | string;
+  code: string;
+  message: string;
+  location?: string;
+  excerpt?: string;
+}
+
 export interface TaskDetail {
   task_id: string;
   state: string;
@@ -42,5 +50,5 @@ export interface TaskDetail {
   message: string;
   output_name: string | null;
   download_url: string | null;
-  error: { code?: string; message?: string } | null;
+  error: { code?: string; message?: string; issues?: ValidationIssue[] } | null;
 }

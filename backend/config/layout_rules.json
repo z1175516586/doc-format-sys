@@ -43,7 +43,11 @@
     "max_level": 4,
     "style_name_template": "Heading {level}",
     "space_before_pt": 0.0,
-    "space_after_pt": 0.0
+    "space_after_pt": 0.0,
+    "number_separator": " ",
+    "candidate_max_chars": 60,
+    "chapter_title_max_chars": 20,
+    "description": "candidate_max_chars / chapter_title_max_chars 用于区分真标题与以数字开头的正文，避免误报跳号"
   },
   "output": {
     "filename_datetime_format": "%y%m%d%H%M%S",

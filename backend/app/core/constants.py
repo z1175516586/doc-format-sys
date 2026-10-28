@@ -69,6 +69,9 @@ DEFAULT_LAYOUT_RULES: dict[str, Any] = {
         "style_name_template": "Heading {level}",
         "space_before_pt": 0.0,
         "space_after_pt": 0.0,
+        "number_separator": " ",
+        "candidate_max_chars": 60,
+        "chapter_title_max_chars": 20,
     },
     "output": {
         "filename_datetime_format": "%y%m%d%H%M%S",
@@ -128,10 +131,12 @@ DEFAULT_COVER_CONFIG: dict[str, Any] = {
     "metadata": {
         "merge_company_prefix": True,
         "company_suffix_pattern": "(公司|集团|厂|研究院|设计院|中心)$",
-        "project_name_suffix": "项目",
+        "project_name_suffixes": ["项目", "工程", "改造", "总承包", "总承包工程", "技改", "建设"],
+        "title_window": 4,
+        "min_title_length": 4,
         "date_year_month_day_pattern": r"(\d{4}年\d{1,2}月\d{1,2}[日号]|\d{4}-\d{1,2}-\d{1,2}|\d{4}/\d{1,2}/\d{1,2})",
         "date_year_month_pattern": r"(\d{4}年\d{1,2}月)",
-        "library_number_pattern": r"库号[:：]\s*(\S+)",
+        "library_number_pattern": r"库号[:：]\s*([A-Za-z0-9\-_]+)",
         "personnel_role_keywords": ["主管领导", "副总工程师", "总设计师", "总经理", "经理", "主任", "工程师"],
         "design_filter_keywords": ["可行性研究", "初步设计", "代初步", "代可研", "代可行"],
     },
@@ -148,6 +153,41 @@ DEFAULT_COVER_CONFIG: dict[str, Any] = {
     },
 }
 
+DEFAULT_VALIDATION_RULES: dict[str, Any] = {
+    "enabled": True,
+    "max_issues": 20,
+    "cover_region": {
+        "type_line_max_chars": 20,
+    },
+    "document_type": {
+        "severity": "error",
+        "mismatch_severity": "error",
+        "stage_keywords": ["初步设计", "可行性研究", "可研", "初设", "代初步", "代可研", "代初设"],
+        "allowed_suffixes": ["说明书", "报告"],
+    },
+    "heading": {
+        "number_pattern": r"^\d+(?:\.\d+)*$",
+        "separator_pattern": "[ \t\u3000]+",
+        "number_like_pattern": r"^[0-9０-９.．。]+",
+        "max_excerpt_chars": 40,
+        "glued_severity": "warning",
+        "invalid_severity": "error",
+        "missing_number_severity": "warning",
+        "jump_same_chapter_severity": "error",
+        "jump_cross_chapter_severity": "warning",
+    },
+    "messages": {
+        "document_type_missing": "封面没有找到文档类型（初步设计 / 可行性研究 / 初步设计（代可研）/ 可行性研究（代初设）），请补齐后再上传。",
+        "document_type_unknown": "封面上的文档类型「{text}」不是规范写法，只能是：初步设计、可行性研究、初步设计（代可研）、可行性研究（代初设）。",
+        "document_type_mismatch": "封面上的文档类型是「{detected}」，与选择的「{selected}」不一致，请选择与封面一致的文档类型。",
+        "heading_number_invalid": "标题「{text}」的编号不规范：编号只能由数字和点组成，必须以数字开头和结尾，数字与点必须交替出现，并与标题之间留一个空格。",
+        "heading_number_glued": "标题「{text}」的编号与标题之间缺少空格，规范写法应为「{number} 标题」。",
+        "heading_missing_number": "「{text}」被标记为标题样式，但没有可用编号，已按正文处理。",
+        "heading_jump_same_chapter": "标题编号跳号：「{prev}」之后直接出现「{curr}」（{text}），转换已终止。",
+        "heading_jump_cross_chapter": "标题编号不连续：「{prev}」之后出现「{curr}」（{text}），请确认是否跳号。",
+    },
+}
+
 
 @lru_cache
 def cover_config() -> dict[str, Any]:
@@ -161,6 +201,16 @@ def layout_rules() -> dict[str, Any]:
     """排版规则常量。"""
     settings = get_settings()
     return _merge(DEFAULT_LAYOUT_RULES, _load_json(settings.config_dir / "layout_rules.json"))
+
+
+@lru_cache
+def validation_rules() -> dict[str, Any]:
+    """源文档规范校验规则。"""
+    settings = get_settings()
+    return _merge(
+        DEFAULT_VALIDATION_RULES,
+        _load_json(settings.config_dir / "validation_rules.json"),
+    )
 
 
 @lru_cache

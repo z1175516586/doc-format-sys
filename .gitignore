@@ -229,4 +229,7 @@ template
 # 运行产物与本次变更中的临时文件
 backend/data/
 ~$*
-test/261028093442_0da612.docx
+
+# 本地排查脚本与样例文档，不入库
+backend/_probe_*.py
+test/*.docx

@@ -205,10 +205,19 @@ class TaskService:
             )
         )
 
-    def mark_failed(self, task_id: str, code: str, message: str) -> None:
+    def mark_failed(
+        self,
+        task_id: str,
+        code: str,
+        message: str,
+        *,
+        issues: list[dict[str, object]] | None = None,
+    ) -> None:
         task = self.get(task_id)
         task.state = TaskState.FAILED
         task.error = {"code": code, "message": message}
+        if issues:
+            task.error["issues"] = issues
         task.message = message
         task.finished_at = _now()
         task.emit(

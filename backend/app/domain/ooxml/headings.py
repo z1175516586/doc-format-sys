@@ -26,13 +26,19 @@ from app.core.logging import get_logger
 from app.core.namespaces import NSMAP, qn, w_attr
 from app.domain.ooxml.package import DocxPackage, paragraph_text
 from app.domain.ooxml.styles import StyleProcessor
-from app.domain.ooxml.toc import is_generated_toc_line
+from app.domain.ooxml.toc import has_toc_field_instruction, is_generated_toc_line
 
 logger = get_logger(__name__)
 
 # 标题编号正则：1 / 1.2 / 1.2.3 ...，且编号后紧跟的非空白字符不能是 ) . 、 -
 # 这条排除规则很关键：正文里 "1." "1、" 之类的列表项不应被误判为标题
 _HEADING_PATTERN = re.compile(r"^(\d+(?:\.\d+){0,4})[\s\t]*(?![)）\.、\-])(.+)$")
+
+# 规范写法：编号与标题之间必须有空白（校验用，不改变识别口径）
+_STRICT_HEADING_PATTERN = re.compile(r"^(\d+(?:\.\d+){0,4})[ \t\u3000]+(\S.*)$")
+
+# 以数字/点开头但无法构成合法编号（如 "1..1"、"1."），用于指出格式错误
+_NUMBER_LIKE_PATTERN = re.compile(r"^[0-9０-９.．。]+")
 
 # 目录标题识别：允许"目 录"、"目      录"等任意空白
 _TOC_PATTERN = re.compile(r"目[\s\t]*录")
@@ -48,6 +54,21 @@ def _inside_table(paragraph: etree._Element) -> bool:
             return True
         current = current.getparent()
     return False
+
+
+def _direct_outline_level(paragraph: etree._Element) -> int | None:
+    """段落自己写的大纲级别（0-8 会进目录，9 是正文）。"""
+    ppr = paragraph.find(qn("w:pPr"))
+    if ppr is None:
+        return None
+    outline = ppr.find(qn("w:outlineLvl"))
+    if outline is None:
+        return None
+    try:
+        level = int(outline.get(w_attr("val")) or "")
+    except (TypeError, ValueError):
+        return None
+    return level if level < 9 else None
 
 
 def is_valid_heading_order(prev_number: str, curr_number: str) -> bool:
@@ -96,6 +117,11 @@ class HeadingReport:
     skipped_first_level1: list[str] = field(default_factory=list)
     invalid_order: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # 校验明细：(段落序号, 文本) / (段落序号, 前一号, 当前号, 文本) / (段落序号, 编号, 文本)
+    glued: list[tuple[int, str, str]] = field(default_factory=list)
+    malformed: list[tuple[int, str]] = field(default_factory=list)
+    missing_number: list[tuple[int, str]] = field(default_factory=list)
+    jumps: list[tuple[int, str, str, str]] = field(default_factory=list)
 
 
 class HeadingProcessor:
@@ -142,8 +168,13 @@ class HeadingProcessor:
         report = HeadingReport()
         self._exclude_table_paragraphs()
 
+        # 标题候选的长度门槛：用于区分“真标题”和“以数字开头的正文”
+        candidate_max = int(layout_rules()["headings"].get("candidate_max_chars", 60))
+        chapter_max = int(layout_rules()["headings"].get("chapter_title_max_chars", 20))
+
         after_toc = False
         prev_number: str | None = None
+        prev_prestyled = False
 
         paragraphs = self.pkg.paragraphs()
 
@@ -161,12 +192,28 @@ class HeadingProcessor:
             if is_generated_toc_line(text):
                 continue
 
+            # 目录域的指令段不参与标题识别（旧式目录可能残留 TOC 域）
+            if has_toc_field_instruction(paragraph):
+                continue
+
             # 含图形对象的段落不参与标题识别
             if paragraph.find(f".//{qn('w:pict')}") is not None:
                 continue
 
+            prestyled = self._is_prestyled_heading(paragraph)
             match = _HEADING_PATTERN.match(text)
             if not match:
+                # 作者已标成标题却没编号：记录下来，交给校验环节提示/报错
+                if prestyled:
+                    target = (
+                        report.malformed
+                        if _NUMBER_LIKE_PATTERN.match(text)
+                        else report.missing_number
+                    )
+                    target.append((index + 1, text))
+                elif self._looks_like_malformed_heading(text, candidate_max):
+                    # 未套标题样式，但形如 "3.1.3.结构设计基本资料："：编号写坏了
+                    report.malformed.append((index + 1, text))
                 continue
 
             if not _balanced_brackets(text):
@@ -176,10 +223,22 @@ class HeadingProcessor:
             number = match.group(1)
             level = number.count(".") + 1
 
+            if prev_number is None and not prestyled:
+                # 第一个标题要从 1 起。目录与正文之间的列表项（如 "17 附图"）
+                # 不能抢在前面，否则整条编号链会被它带偏。
+                if int(number.split(".")[0]) != 1:
+                    continue
+
             if prev_number is not None and not is_valid_heading_order(prev_number, number):
-                report.invalid_order.append(f"{number} (前 {prev_number})")
-                self.styles.set_paragraph_style(paragraph, self._normal_style_id())
-                continue
+                if prestyled and not prev_prestyled:
+                    # 文档自带的标题样式比编号链更可信，以它重新起头
+                    prev_number = None
+                else:
+                    report.invalid_order.append(f"{number} (前 {prev_number})")
+                    if self._looks_like_heading(text, number, prestyled, candidate_max, chapter_max):
+                        report.jumps.append((index + 1, prev_number or "", number, text))
+                    self.styles.set_paragraph_style(paragraph, self._normal_style_id())
+                    continue
 
             style_id = self._style_for_level(level)
             if style_id is None:
@@ -191,7 +250,10 @@ class HeadingProcessor:
             self._clear_direct_paragraph_layout(paragraph)
             report.detected += 1
             report.levels[level] = report.levels.get(level, 0) + 1
+            if not _STRICT_HEADING_PATTERN.match(text):
+                report.glued.append((index + 1, number, text))
             prev_number = number
+            prev_prestyled = prestyled
 
         report.reset_to_normal = self._reverse_correct()
 
@@ -209,6 +271,59 @@ class HeadingProcessor:
         return report
 
     # ------------------------------------------------------------------
+    def _is_prestyled_heading(self, paragraph: etree._Element) -> bool:
+        """段落是否已经套用了标题样式（不含表格内的段落）。"""
+        if _inside_table(paragraph):
+            return False
+        style_id = self.styles.paragraph_style_id(paragraph)
+        return bool(style_id and self.styles.resolver.is_heading(style_id))
+
+    @staticmethod
+    def _looks_like_malformed_heading(text: str, candidate_max: int) -> bool:
+        """未套标题样式，但形如 "3.1.3.标题" 的坏编号标题。
+
+        只在编号本身带 ≥2 个点、文本是短句时判定：
+        "1）…" 这类列表项（无点）和 "1.改造前…"（1 个点）都不会误伤。
+        """
+        stripped = text.rstrip()
+        if not stripped or len(stripped) > candidate_max:
+            return False
+        if stripped.endswith(("。", "；", "，", ";", ",")):
+            return False
+        match = _NUMBER_LIKE_PATTERN.match(stripped)
+        return bool(match) and match.group(0).count(".") >= 2
+
+    @staticmethod
+    def _looks_like_heading(
+        text: str,
+        number: str,
+        prestyled: bool,
+        candidate_max: int,
+        chapter_max: int,
+    ) -> bool:
+        """判断一个"顺序不合法"的段落，是真的跳号标题还是普通正文。
+
+        判定只影响是否把它当成跳号错误上报，不影响标题识别结果：
+        - 已套标题样式：一定是作者意图中的标题
+        - 多级编号且"编号 + 空格 + 短标题"：如 "2.4.1.2 除尘器"
+        - 一级编号且"编号 + 空格 + 短标题"：如 "3 系统方案"
+        其余（如 "10kV电源引自…"、"747.08万元"）按正文处理，不上报。
+        """
+        if prestyled:
+            return True
+        stripped = text.rstrip()
+        if len(stripped) > candidate_max:
+            return False
+        if stripped.endswith(("。", "；", "，", ";", ",")):
+            return False
+        if not _STRICT_HEADING_PATTERN.match(text):
+            return False
+        parts = number.split(".")
+        if len(parts) >= 2:
+            # 章节号不会出现 747.08 这种量级，过滤正文里的数值
+            return all(part.isdigit() and int(part) <= 99 for part in parts)
+        return len(stripped) <= chapter_max
+
     def _exclude_table_paragraphs(self) -> None:
         """表格里的文字不参与标题识别，也不进入目录。
 
@@ -253,18 +368,39 @@ class HeadingProcessor:
         return self.styles.resolver.id_of("normal") or self.styles.resolver.id_of("正文") or "Normal"
 
     def _reverse_correct(self) -> int:
-        """反向纠错：已是标题样式但文本不符合编号规则的段落还原为正文。"""
+        """反向纠错：已是标题样式或带大纲级别，但文本不符合编号规则的段落还原为正文。
+
+        有些文档给普通列表项直接写了 w:outlineLvl，Word 会把它们收进目录，
+        这里一并清掉，只留真正的编号标题。
+        """
         corrected = 0
         for paragraph in self.pkg.paragraphs():
             style_id = self.styles.paragraph_style_id(paragraph)
-            if not style_id or not self.styles.resolver.is_heading(style_id):
+            heading_style = bool(style_id and self.styles.resolver.is_heading(style_id))
+            direct_outline = _direct_outline_level(paragraph) is not None
+            if not heading_style and not direct_outline:
                 continue
             if _HEADING_PATTERN.match(paragraph_text(paragraph)):
                 continue
 
-            self.styles.set_paragraph_style(paragraph, self._normal_style_id())
+            if heading_style:
+                self.styles.set_paragraph_style(paragraph, self._normal_style_id())
+            if direct_outline:
+                self._clear_direct_outline(paragraph)
             corrected += 1
         return corrected
+
+    @staticmethod
+    def _clear_direct_outline(paragraph: etree._Element) -> None:
+        """段落上的大纲级别降为正文（9），避免被目录收录。"""
+        ppr = paragraph.find(qn("w:pPr"))
+        if ppr is None:
+            ppr = etree.Element(qn("w:pPr"))
+            paragraph.insert(0, ppr)
+        outline = ppr.find(qn("w:outlineLvl"))
+        if outline is None:
+            outline = etree.SubElement(ppr, qn("w:outlineLvl"))
+        outline.set(w_attr("val"), "9")
 
     # ------------------------------------------------------------------
     def heading_count(self) -> dict[int, int]:

@@ -17,14 +17,17 @@ export const NOTICES = [
   "上传的文档至少包含四部分：封面、设计人员名单、目录和正文",
   "转换后某些空白字符（如空格、制表符）会有适当变化",
   "转换后表题和注释的样式会有适当变化",
-  "标题序号请勿跳号或重复，错误编号不会被设置为标题样式，影响目录生成",
+  "标题编号必须是「1」「1.1」「1.2.1」这类数字与点交替的写法，且编号与标题之间留空格",
+  "标题跳号、编号不规范或封面文档类型不对时，转换会终止并列出具体问题",
 ] as const;
 
 /** 与后端 PIPELINE_STEPS 对应，供进度条展示。 */
 export const STEP_LABELS: Record<string, string> = {
   open: "打开文档",
+  precheck: "校验封面类型",
   repair: "修复结构",
   numbering: "编号转文本",
+  conformance: "校验标题编号",
   orientation: "页面方向",
   footer: "清理页脚",
   highlight: "清除高亮",

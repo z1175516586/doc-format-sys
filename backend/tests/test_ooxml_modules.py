@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from lxml import etree
+
 from app.core.namespaces import NSMAP, qn
 from app.domain.ooxml.header_footer import HeaderFooterProcessor
 from app.domain.ooxml.highlighting import HighlightProcessor
@@ -116,3 +118,91 @@ def test_picture_processor_no_crash_without_images(sample_docx: Path) -> None:
         processor = PictureProcessor(pkg)
         assert processor.count() == 0
         assert processor.reset_indent() == 0
+
+
+def test_heading_number_keeps_one_space() -> None:
+    from app.domain.ooxml.numbering import format_number_label
+
+    assert format_number_label("1 ") == "1 "
+    assert format_number_label("1  ") == "1 "
+    assert format_number_label("1.1 ") == "1.1 "
+    assert format_number_label("1") == "1 "
+
+
+def test_body_header_aligns_and_footer_line_is_full(tmp_path: Path) -> None:
+    from shutil import copyfile
+
+    from app.core.config import get_settings
+    from app.services.template_service import TemplateService
+
+    source = get_settings().resources_dir / "content_template.docx"
+    target = tmp_path / "chrome.docx"
+    copyfile(source, target)
+
+    with DocxPackage.open(target) as pkg:
+        header = pkg.xml("word/header1.xml")
+        for ptab in list(header.iter(qn("w:ptab"))):
+            tab = etree.Element(qn("w:tab"))
+            ptab.getparent().replace(ptab, tab)
+        TemplateService().polish_header_footer(pkg, cover_sections=0)
+        header = pkg.xml("word/header1.xml")
+        ptabs = list(header.iter(qn("w:ptab")))
+        assert len(ptabs) == 1
+        assert ptabs[0].get(qn("w:alignment")) == "right"
+        assert ptabs[0].get(qn("w:relativeTo")) == "margin"
+        assert list(header.iter(qn("w:tab"))) == []
+
+        footer = pkg.xml("word/footer1.xml")
+        wraps = [
+            el
+            for el in footer.iter()
+            if el.tag.endswith("}wrap") or el.tag.endswith("}wrapSquare")
+        ]
+        assert wraps
+        assert all((el.get("type") or "").lower() == "none" for el in wraps if el.tag.endswith("}wrap"))
+        assert list(footer.iter(qn("wp:wrapSquare"))) == []
+
+        from app.services.template_service import _release_footer_shapes
+
+        snippet = etree.fromstring(
+            '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
+            '<wp:anchor behindDoc="0"><wp:wrapSquare wrapText="bothSides"/></wp:anchor></w:ftr>'
+        )
+        _release_footer_shapes(snippet)
+        assert list(snippet.iter(qn("wp:wrapSquare"))) == []
+        assert list(snippet.iter(qn("wp:wrapNone")))
+
+
+def test_front_cover_header_footer_cleared(sample_docx: Path) -> None:
+    from docx import Document
+
+    from app.services.template_service import TemplateService
+
+    document = Document(sample_docx)
+    document.sections[0].header.paragraphs[0].text = "封面不该出现的页眉"
+    document.save(sample_docx)
+
+    with DocxPackage.open(sample_docx) as pkg:
+        header = next(pkg.iter_parts(prefix="word/header", suffix=".xml"))
+        node = next(pkg.xml(header).iter(qn("w:t")), None)
+        if node is None:
+            paragraph = next(pkg.xml(header).iter(qn("w:p")))
+            run = etree.SubElement(paragraph, qn("w:r"))
+            node = etree.SubElement(run, qn("w:t"))
+        node.text = "封面不该出现的页眉"
+
+        TemplateService().polish_header_footer(pkg, cover_sections=2)
+
+        rels = pkg.xml("word/_rels/document.xml.rels")
+        rel_map = {rel.get("Id"): rel.get("Target") for rel in rels}
+        section = pkg.section_properties()[0]
+        header_refs = section.findall(qn("w:headerReference"))
+        footer_refs = section.findall(qn("w:footerReference"))
+        assert {ref.get(qn("w:type")) for ref in header_refs} == {"even", "default", "first"}
+        assert {rel_map[ref.get(qn("r:id"))] for ref in header_refs} == {"header_blank.xml"}
+        assert {rel_map[ref.get(qn("r:id"))] for ref in footer_refs} == {"footer_blank.xml"}
+        blank = pkg.xml("word/header_blank.xml")
+        assert "".join(item.text or "" for item in blank.iter(qn("w:t"))) == ""
+        bottoms = list(blank.iter(qn("w:bottom")))
+        assert bottoms and bottoms[0].get(qn("w:val")) == "nil"

@@ -177,7 +177,7 @@ async def convert_sync(
     )
 
     if not result.success or not result.output_path:
-        raise ValidationError(result.message)
+        raise ValidationError(result.message, detail=result.issues or None)
 
     output = Path(result.output_path)
     if not output.exists():

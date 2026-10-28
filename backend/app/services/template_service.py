@@ -226,9 +226,8 @@ class TemplateService:
     ) -> list[str]:
         """正文模板的页眉页脚套到封面第三页、目录和正文。
 
-        封面第一、二页留在第一节，继续用封面自己的页眉页脚。
-        封面第三页（设计人员）和目录用同一套页眉页脚，并且不编页码。
-        目录之后的正文从 1 开始连续编页码。
+        封面第一、二页不要页眉页脚。封面第三页（设计人员）和目录用同一套，
+        并且不编页码。目录之后的正文从 1 开始连续编页码。
         """
         warnings: list[str] = []
         try:
@@ -238,10 +237,7 @@ class TemplateService:
             return warnings
 
         toc_section = self._toc_section_index(target)
-        if cover_sections >= 2:
-            plain_from = cover_sections - 1
-        else:
-            plain_from = cover_sections
+        plain_from = self._plain_section_start(cover_sections)
         numbered_from = toc_section + 1 if toc_section >= plain_from else plain_from
 
         with template:
@@ -310,6 +306,101 @@ class TemplateService:
         if filled:
             logger.info("页眉已填入: %s | %s", left, right)
         return filled
+
+    def polish_header_footer(self, target: DocxPackage, cover_sections: int) -> None:
+        """校正页眉页脚：封面首页空白、正文左右对齐、页脚横线贯通。
+
+        排版引擎刷新域时会把右对齐定位符改成普通制表符，页脚文本框的环绕也会
+        把上划线截短。保存后和引擎刷新后都要再跑一遍。
+        """
+        plain_from = self._plain_section_start(cover_sections)
+        self._clear_front_header_footer(target, plain_from)
+        self._restore_header_alignment(target)
+        self._unwrap_footer_shapes(target)
+
+    @staticmethod
+    def _plain_section_start(cover_sections: int) -> int:
+        """封面第三页所在节。前两页通常同属第一节，所以从倒数第二节开始套正文页眉。"""
+        if cover_sections >= 2:
+            return cover_sections - 1
+        return cover_sections
+
+    def _clear_front_header_footer(self, target: DocxPackage, plain_from: int) -> None:
+        """封面前两页换成没有横线、没有文字的页眉页脚。"""
+        if plain_from <= 0:
+            return
+        header_rel = self._install_blank_part(
+            target,
+            "word/header_blank.xml",
+            "w:hdr",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
+            "rIdBlankHeader",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        )
+        footer_rel = self._install_blank_part(
+            target,
+            "word/footer_blank.xml",
+            "w:ftr",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer",
+            "rIdBlankFooter",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+        )
+        self._bind_blank_range(target, "w:headerReference", header_rel, plain_from)
+        self._bind_blank_range(target, "w:footerReference", footer_rel, plain_from)
+
+    def _install_blank_part(
+        self,
+        target: DocxPackage,
+        part_name: str,
+        root_tag: str,
+        rel_type: str,
+        rel_id_base: str,
+        content_type: str,
+    ) -> str:
+        target.add_part(part_name, _blank_header_footer(root_tag))
+        return self._ensure_part_relationship(
+            target, part_name, rel_type, rel_id_base, content_type
+        )
+
+    @staticmethod
+    def _bind_blank_range(target: DocxPackage, tag: str, rel_id: str, end: int) -> None:
+        """首页、偶数页、默认页都指向同一份空白部件，避免样式横线漏出来。"""
+        for index, sect_pr in enumerate(target.section_properties()):
+            if index >= end:
+                continue
+            for ref in list(sect_pr.findall(qn(tag))):
+                sect_pr.remove(ref)
+            title_pg = sect_pr.find(qn("w:titlePg"))
+            if title_pg is not None:
+                sect_pr.remove(title_pg)
+            for kind in ("even", "default", "first"):
+                ref = etree.Element(qn(tag))
+                ref.set(w_attr("type"), kind)
+                ref.set(qn("r:id"), rel_id)
+                sect_pr.insert(0, ref)
+
+    @staticmethod
+    def _restore_header_alignment(target: DocxPackage) -> None:
+        """页眉左侧项目名称、右侧文档类型，贴齐左右页边。"""
+        for name in target.part_names:
+            if not (name.startswith("word/header") and name.endswith(".xml")):
+                continue
+            root = target.xml(name)
+            if not _has_visible_border(root, "w:bottom"):
+                continue
+            for paragraph in root.iter(qn("w:p")):
+                _ensure_right_aligned_tab(paragraph)
+
+    @staticmethod
+    def _unwrap_footer_shapes(target: DocxPackage) -> None:
+        """页码文本框改为不环绕，避免把页脚上划线截成半截。"""
+        for name in target.part_names:
+            if not (name.startswith("word/footer") and name.endswith(".xml")):
+                continue
+            root = target.xml(name)
+            if not _has_visible_border(root, "w:top"):
+                continue
+            _release_footer_shapes(root)
 
     def _ensure_header_relationship(self, target: DocxPackage, part_name: str) -> str:
         return self._ensure_part_relationship(
@@ -663,3 +754,95 @@ class TemplateService:
         default = etree.SubElement(root, qn("ct:Default"))
         default.set("Extension", ext)
         default.set("ContentType", content_type)
+
+
+def _blank_header_footer(root_tag: str) -> bytes:
+    """空白页眉/页脚。不用 Header/Footer 样式，四边框显式取消，避免样式横线。"""
+    root = etree.Element(qn(root_tag), nsmap={"w": NSMAP["w"]})
+    paragraph = etree.SubElement(root, qn("w:p"))
+    ppr = etree.SubElement(paragraph, qn("w:pPr"))
+    borders = etree.SubElement(ppr, qn("w:pBdr"))
+    for edge in ("top", "left", "bottom", "right"):
+        border = etree.SubElement(borders, qn(f"w:{edge}"))
+        border.set(w_attr("val"), "nil")
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
+def _has_visible_border(root: etree._Element, edge: str) -> bool:
+    for border in root.iter(qn(edge)):
+        value = (border.get(w_attr("val")) or "").lower()
+        if value not in ("", "nil", "none"):
+            return True
+    return False
+
+
+def _ensure_right_aligned_tab(paragraph: etree._Element) -> None:
+    """在最后一段文字前放一个贴右页边的定位符。"""
+    text_runs = [
+        run
+        for run in paragraph.findall(qn("w:r"))
+        if any((node.text or "").strip() for node in run.findall(qn("w:t")))
+    ]
+    if len(text_runs) < 2:
+        return
+
+    for tab in list(paragraph.iter(qn("w:tab"))):
+        parent = tab.getparent()
+        if parent is not None and parent.tag == qn("w:r"):
+            parent.remove(tab)
+    for ptab in list(paragraph.iter(qn("w:ptab"))):
+        parent = ptab.getparent()
+        if parent is not None and parent.tag == qn("w:r"):
+            owner = parent.getparent()
+            if owner is not None:
+                owner.remove(parent)
+
+    last = text_runs[-1]
+    if last.getparent() is None:
+        return
+    ptab_run = etree.Element(qn("w:r"))
+    rpr = last.find(qn("w:rPr"))
+    if rpr is not None:
+        ptab_run.append(etree.fromstring(etree.tostring(rpr)))
+    ptab = etree.SubElement(ptab_run, qn("w:ptab"))
+    ptab.set(w_attr("relativeTo"), "margin")
+    ptab.set(w_attr("alignment"), "right")
+    ptab.set(w_attr("leader"), "none")
+    last.addprevious(ptab_run)
+
+
+_WRAPPING_TAGS = (
+    "wp:wrapSquare",
+    "wp:wrapTight",
+    "wp:wrapThrough",
+    "wp:wrapTopAndBottom",
+)
+# 模板页脚用的是 VML 环绕（w10:wrap），引擎刷新后会变成 wp:wrapSquare。两种都要放开。
+_W10_NS = "urn:schemas-microsoft-com:office:word"
+
+
+def _release_footer_shapes(root: etree._Element) -> None:
+    """文本框不再环绕，白底也不再盖住横线。页码文字保留。"""
+    wrapping = {qn(tag) for tag in _WRAPPING_TAGS}
+    for anchor in list(root.iter(qn("wp:anchor"))):
+        anchor.set("behindDoc", "0")
+        for child in list(anchor):
+            if child.tag in wrapping:
+                anchor.replace(child, etree.Element(qn("wp:wrapNone")))
+        for fill in list(anchor.iter(qn("a:solidFill"))):
+            parent = fill.getparent()
+            if parent is not None:
+                parent.replace(fill, etree.Element(qn("a:noFill")))
+
+    for shape in list(root.iter(qn("v:shape"))):
+        style = re.sub(r"mso-wrap-style:[^;]+", "mso-wrap-style:none", shape.get("style") or "")
+        shape.set("style", style)
+        shape.set("filled", "f")
+        shape.attrib.pop("fillcolor", None)
+    for fill in list(root.iter(qn("v:fill"))):
+        parent = fill.getparent()
+        if parent is not None:
+            parent.remove(fill)
+    for wrap in list(root.iter(f"{{{_W10_NS}}}wrap")):
+        if (wrap.get("type") or "").lower() in ("square", "tight", "through", "topandbottom"):
+            wrap.set("type", "none")

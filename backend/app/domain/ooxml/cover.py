@@ -35,6 +35,9 @@ logger = get_logger(__name__)
 # 封面元数据里出现即视为"图形/文本框"，不参与文本识别
 _SKIP_TAGS = ("w:drawing", "w:pict", "w:txbxContent")
 
+# 封面图形锚点留下的坐标文本，如 10795-444500
+_POSITION_NOISE = re.compile(r"[\d\-–—.．]+")
+
 
 @dataclass
 class CoverMetadata:
@@ -95,7 +98,11 @@ class CoverMetadataExtractor:
         self.marker = config["designers_marker"]
         rules = config["metadata"]
         self.company_suffix = re.compile(rules["company_suffix_pattern"])
-        self.project_suffix = rules["project_name_suffix"]
+        self.project_suffixes = _suffix_list(rules)
+        self.title_window = int(rules.get("title_window", 4))
+        self.min_title_length = int(rules.get("min_title_length", 4))
+        self.stage_primary = tuple(config["stage_primary_variants"])
+        self.stage_secondary = tuple(config["stage_secondary_variants"])
         self.library_pattern = re.compile(rules["library_number_pattern"])
         self.date_day = re.compile(rules["date_year_month_day_pattern"])
         self.date_month = re.compile(rules["date_year_month_pattern"])
@@ -126,15 +133,17 @@ class CoverMetadataExtractor:
                 meta.personnel.append(self._split_personnel(text))
                 continue
 
-            if not meta.project_name and self._is_project_name(text):
-                meta.project_name = text
-
-        if meta.project_name and self.merge_company_prefix:
-            meta.project_name = self._prepend_company(meta.project_name, texts)
+        project, company = self._locate_title(texts)
+        if project:
+            meta.project_name = self._join_company(project, company)
 
         return meta
 
     # ------------------------------------------------------------------
+    def cover_paragraph_texts(self) -> list[str]:
+        """公开封面区段落文本（校验器复用，避免重复实现定位逻辑）。"""
+        return self._cover_paragraph_texts()
+
     def _cover_paragraph_texts(self) -> list[str]:
         """取标记段落之前的所有非空段落文本（含表格内段落）。"""
         texts: list[str] = []
@@ -182,31 +191,100 @@ class CoverMetadataExtractor:
         name = _compact(parts[1]) if len(parts) > 1 else ""
         return role, name
 
+    def _locate_title(self, texts: list[str]) -> tuple[str, str]:
+        """用文档类型（初步设计 / 可行性研究）当锚点，往上取标题区。
+
+        封面的标题排法各稿不同：有的单位、项目各占一行，有的只有一行，
+        还有的项目名不以「项目」结尾（如「…改造工程」）。
+        但标题区下面一定紧跟文档类型，所以拿它当锚点最稳定。
+        返回 (项目名, 单位名)。
+        """
+        anchor = self._stage_anchor_index(texts)
+        if anchor is None:
+            return self._fallback_title(texts), ""
+
+        company = ""
+        parts: list[str] = []
+        for text in self._title_candidates(texts[:anchor]):
+            stripped = text.strip()
+            if self.company_suffix.search(_compact(stripped)):
+                if not company:
+                    company = stripped
+                continue
+            parts.append(stripped)
+
+        return "".join(parts), company
+
+    def _stage_anchor_index(self, texts: list[str]) -> int | None:
+        """第一个文档类型段落的位置。文字可能带空格，如「可 行 性 研 究」。"""
+        stages = set(self.stage_primary) | set(self.stage_secondary)
+        for index, text in enumerate(texts):
+            if _compact(text) in stages:
+                return index
+        return None
+
+    def _title_candidates(self, texts: list[str]) -> list[str]:
+        """锚点上方紧邻的几行，去掉页码、日期、库号这类非标题行。"""
+        collected: list[str] = []
+        for text in reversed(texts):
+            stripped = text.strip()
+            if not stripped:
+                continue
+            if self._is_title_noise(stripped):
+                # 紧邻的噪声行（如封面右上角的编号）跳过，不打断收集
+                continue
+            collected.append(stripped)
+            if len(collected) >= self.title_window:
+                break
+        collected.reverse()
+        return collected
+
+    def _is_title_noise(self, text: str) -> bool:
+        compact = _compact(text)
+        if not compact or len(compact) < self.min_title_length:
+            return True
+        # 封面图形锚点的坐标残留，如 10795-444500、2327910-101600
+        if _POSITION_NOISE.fullmatch(compact):
+            return True
+        if self._pick_date(compact):
+            return True
+        if self.library_pattern.search(compact) or "库号" in compact:
+            return True
+        if self._is_personnel(text):
+            return True
+        return any(keyword in compact for keyword in self.skip_keywords)
+
+    def _fallback_title(self, texts: list[str]) -> str:
+        """没有文档类型锚点时按结尾词兜底。"""
+        for text in texts:
+            stripped = text.strip()
+            if not stripped or self._is_title_noise(stripped):
+                continue
+            if self._is_project_name(stripped):
+                return stripped
+        for text in texts:
+            stripped = text.strip()
+            if stripped and not self._is_title_noise(stripped):
+                return stripped
+        return ""
+
+    def _join_company(self, project: str, company: str) -> str:
+        """单位与项目名在模板里是同一段的上下两行。"""
+        if not project:
+            return project
+        if company and self.merge_company_prefix:
+            logger.info("封面项目名按两行合并: %s / %s", company, project)
+            return f"{company}\n{project}"
+        return project
+
     def _is_project_name(self, text: str) -> bool:
-        """项目名：以"项目"结尾且不含日期，也不是单位名。"""
+        """兜底判据：以常见工程/项目结尾词收尾，且不是单位名。"""
         stripped = text.strip()
-        if not stripped.endswith(self.project_suffix):
+        if not any(stripped.endswith(suffix) for suffix in self.project_suffixes):
             return False
         if self._pick_date(stripped):
             return False
         return not self.company_suffix.search(stripped)
-
-    def _prepend_company(self, project_name: str, texts: list[str]) -> str:
-        """封面项目名常拆成"单位 / 项目"两行，模板只有一个占位段落。
-
-        规则显式写在配置里（merge_company_prefix），可关闭。
-        """
-        if not project_name:
-            return project_name
-        for text in texts:
-            stripped = text.strip()
-            if not stripped or stripped == project_name:
-                continue
-            if self.company_suffix.search(stripped) and not self._pick_date(stripped):
-                merged = f"{stripped}\n{project_name}"
-                logger.info("封面项目名按两行合并: %s / %s", stripped, project_name)
-                return merged
-        return project_name
 
 
 # ----------------------------------------------------------------------
@@ -534,6 +612,17 @@ def _paragraph_has_logo(paragraph: etree._Element) -> bool:
         if (docpr.get("descr") or "") == "LOGO1":
             return True
     return False
+
+
+def _suffix_list(rules: dict) -> tuple[str, ...]:
+    """项目名结尾词。兼容旧配置里的单值 project_name_suffix。"""
+    suffixes = rules.get("project_name_suffixes")
+    if isinstance(suffixes, str):
+        return (suffixes,)
+    if suffixes:
+        return tuple(str(item) for item in suffixes if item)
+    legacy = rules.get("project_name_suffix")
+    return (str(legacy),) if legacy else ("项目",)
 
 
 def _inside_skipped(root: etree._Element, node: etree._Element) -> bool:

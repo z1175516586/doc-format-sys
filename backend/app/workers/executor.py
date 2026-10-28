@@ -59,8 +59,9 @@ class TaskExecutor:
         try:
             result = service.format(request, on_progress=on_progress)
         except AppError as exc:
-            self._record_failure(task_id, source_hash, request, exc.code, exc.message)
-            self.tasks.mark_failed(task_id, exc.code, exc.message)
+            issues = getattr(exc, "issues", None)
+            self._record_failure(task_id, source_hash, request, exc.code, exc.message, issues)
+            self.tasks.mark_failed(task_id, exc.code, exc.message, issues=issues)
             return
         except Exception as exc:
             logger.exception("任务 %s 未预期异常", task_id)
@@ -85,7 +86,9 @@ class TaskExecutor:
         if result.success and output_path is not None:
             self.tasks.mark_succeeded(task_id, str(output_path), output_path.name)
         else:
-            self.tasks.mark_failed(task_id, "layout_failed", result.message)
+            self.tasks.mark_failed(
+                task_id, "layout_failed", result.message, issues=result.issues
+            )
 
     def _record_failure(
         self,
@@ -94,8 +97,14 @@ class TaskExecutor:
         request: FormatRequest,
         code: str,
         message: str,
+        issues: list[dict[str, object]] | None = None,
     ) -> None:
         try:
+            warnings = [code]
+            for item in issues or []:
+                text = str(item.get("message") or "")
+                if text:
+                    warnings.append(text)
             self.history.record(
                 task_id=task_id,
                 source_name=Path(request.source_path).name,
@@ -106,7 +115,7 @@ class TaskExecutor:
                 message=message,
                 engine="unknown",
                 duration_ms=0,
-                warnings=[code],
+                warnings=warnings,
             )
         except Exception:
             logger.exception("写历史失败")

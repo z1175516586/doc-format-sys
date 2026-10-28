@@ -1,0 +1,38 @@
+{
+  "description": "源文档规范校验。severity 取值：error（终止转换）/ warning（继续但提示）/ off（忽略）",
+  "enabled": true,
+  "max_issues": 20,
+  "cover_region": {
+    "type_line_max_chars": 20,
+    "description": "只在设计人员名单之前的封面区里找文档类型，避免把正文里的词当类型"
+  },
+  "document_type": {
+    "severity": "error",
+    "mismatch_severity": "error",
+    "stage_keywords": ["初步设计", "可行性研究", "可研", "初设", "代初步", "代可研", "代初设"],
+    "allowed_suffixes": ["说明书", "报告"],
+    "description": "封面上的文档类型必须是四种规范写法之一（可带「说明书」「报告」后缀），且要与用户选择的类型一致"
+  },
+  "heading": {
+    "number_pattern": "^\\d+(?:\\.\\d+)*$",
+    "separator_pattern": "[ \\t\\u3000]+",
+    "number_like_pattern": "^[0-9０-９.．。]+",
+    "max_excerpt_chars": 40,
+    "glued_severity": "warning",
+    "invalid_severity": "error",
+    "missing_number_severity": "warning",
+    "jump_same_chapter_severity": "error",
+    "jump_cross_chapter_severity": "warning",
+    "description": "编号只能由数字和点组成，必须以数字开头结尾且数字与点交替；编号与标题之间必须有空格；同级编号不得跳号"
+  },
+  "messages": {
+    "document_type_missing": "封面没有找到文档类型（初步设计 / 可行性研究 / 初步设计（代可研）/ 可行性研究（代初设）），请补齐后再上传。",
+    "document_type_unknown": "封面上的文档类型「{text}」不是规范写法，只能是：初步设计、可行性研究、初步设计（代可研）、可行性研究（代初设）。",
+    "document_type_mismatch": "封面上的文档类型是「{detected}」，与选择的「{selected}」不一致，请选择与封面一致的文档类型。",
+    "heading_number_invalid": "标题「{text}」的编号不规范：编号只能由数字和点组成，必须以数字开头和结尾，数字与点必须交替出现，并与标题之间留一个空格。",
+    "heading_number_glued": "标题「{text}」的编号与标题之间缺少空格，规范写法应为「{number} 标题」。",
+    "heading_missing_number": "「{text}」被标记为标题样式，但没有可用编号，已按正文处理。",
+    "heading_jump_same_chapter": "标题编号跳号：「{prev}」之后直接出现「{curr}」（{text}），转换已终止。",
+    "heading_jump_cross_chapter": "标题编号不连续：「{prev}」之后出现「{curr}」（{text}），请确认是否跳号。"
+  }
+}

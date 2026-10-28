@@ -51,6 +51,7 @@ class FormatResult(BaseModel):
     output_path: str | None = None
     steps: list[StepReport] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    issues: list[dict[str, object]] = Field(default_factory=list)
     engine: str = "none"
     duration_ms: int = 0
     message: str = ""

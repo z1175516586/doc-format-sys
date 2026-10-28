@@ -31,6 +31,8 @@ _PLACEHOLDER_TEXT = "按 F9 更新目录"
 _TOC_TITLE_SEARCH = re.compile(r"目\s*录")
 # 旧目录行：编号后粘着页码，如 "1 总论1"、"1.1项目背景3"。正文标题 "1 总论" 不以数字结尾。
 _TOC_ENTRY_LINE = re.compile(r"^\d+(?:\.\d+)*\D+\d+$")
+# TOC 域指令。必须用词边界，否则 "PAGEREF _Toc10827" 里的 _Toc 会误命中。
+_TOC_FIELD = re.compile(r"\bTOC\b")
 
 
 def is_generated_toc_line(text: str) -> bool:
@@ -39,6 +41,30 @@ def is_generated_toc_line(text: str) -> bool:
     if not compact or len(compact) > 40:
         return False
     return _TOC_ENTRY_LINE.fullmatch(compact) is not None
+
+
+def _field_instructions(paragraph: etree._Element) -> str:
+    return "".join(node.text or "" for node in paragraph.iter(qn("w:instrText"))).upper()
+
+
+def has_toc_field_instruction(paragraph: etree._Element) -> bool:
+    """段落里是否挂着 TOC 域（不含 PAGEREF）。"""
+    return _TOC_FIELD.search(_field_instructions(paragraph)) is not None
+
+
+def is_legacy_toc_start(paragraph: etree._Element) -> bool:
+    """旧式目录的起始段：一个 TOC 域，第一条目录项也挤在同一段里。"""
+    return has_toc_field_instruction(paragraph)
+
+
+def is_legacy_toc_entry(paragraph: etree._Element) -> bool:
+    """旧式目录的条目段：带 PAGEREF / HYPERLINK 域，或编号后粘页码。"""
+    instructions = _field_instructions(paragraph)
+    if "PAGEREF" in instructions or "HYPERLINK" in instructions:
+        return True
+    if paragraph.find(f".//{qn('w:hyperlink')}") is not None:
+        return True
+    return is_generated_toc_line(paragraph_text(paragraph))
 
 
 class TocProcessor:
@@ -86,9 +112,43 @@ class TocProcessor:
             removed += 1
 
         removed += self._remove_plain_toc_entries()
+        removed += self._remove_legacy_toc_blocks()
 
         if removed:
             logger.info("移除已有目录 %d 处（保留分节符与正文标题）", removed)
+        return removed
+
+    def _remove_legacy_toc_blocks(self) -> int:
+        """删掉旧式域目录（没有内容控件，每条是带 PAGEREF 的段落）。
+
+        这类目录多由 WPS 或旧版 Word 生成，条目仍是真域。
+        只删条目，段落上挂着的 sectPr 要留下来，否则分节信息会丢。
+        """
+        body = self.pkg.body
+        removed = 0
+
+        for child in list(body):
+            if child.tag != qn("w:p") or not is_legacy_toc_start(child):
+                continue
+
+            cursor = list(body).index(child)
+            while cursor < len(body):
+                node = list(body)[cursor]
+                if node.tag != qn("w:p"):
+                    break
+                if not (is_legacy_toc_entry(node) or not paragraph_text(node).strip()):
+                    break
+                if node.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:
+                    # 分节符所在的段落只清内容，段落本身留着
+                    for sub in list(node):
+                        if sub.tag != qn("w:pPr"):
+                            node.remove(sub)
+                    cursor += 1
+                    continue
+                body.remove(node)
+                removed += 1
+            break
+
         return removed
 
     def _remove_plain_toc_entries(self) -> int:
@@ -327,7 +387,7 @@ class TocProcessor:
     def has_toc_field(self) -> bool:
         """判断文档是否已包含 TOC 域。"""
         for instr in self.pkg.body.iter(qn("w:instrText")):
-            if instr.text and "TOC" in instr.text.upper():
+            if instr.text and _TOC_FIELD.search(instr.text.upper()):
                 return True
         return False
 
