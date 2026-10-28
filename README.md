@@ -14,7 +14,7 @@
 | 后端 | Python 3.11+ / FastAPI |
 | OOXML 核心 | python-docx + lxml（直接操作 XML） |
 | 排版引擎 | LibreOffice headless + UNO（可选，用于目录页码刷新 / PDF 导出） |
-| 前端 | Vite + React 18 + TS + Ant Design 5（规划中） |
+| 前端 | Vite + React 18 + TS + Ant Design 5 + morphicons |
 
 > 设计目标：**无 Office、无 COM、无 Pandoc**，`pip install` 即可在 Linux 运行。
 
@@ -37,6 +37,9 @@ doc-format-sys/
 │   ├── resources/              # 内置种子资源（封面模板）
 │   ├── tests/                  # 测试与回归
 │   └── requirements.txt
+├── frontend/                   # 前端（Vite + React + Ant Design）
+│   ├── src/constants/          # 文案、文档类型、接口路径
+│   └── constants.ts            # 开发端口
 ├── docs/                       # 文档
 │   ├── REFACTOR_PLAN.md        # 重构架构与迁移方案
 │   └── REFACTOR_CHANGELOG.md   # 重构变更记录
@@ -47,31 +50,33 @@ doc-format-sys/
 
 ---
 
-## 快速开始
+## 运行
 
-### 1. 环境准备
+先起后端，再起前端。前端开发服务器把 `/api` 代理到 `http://127.0.0.1:8010`。
+
+### 后端
 
 ```bash
-conda create -n doc-format-sys python=3.11 -y
 conda activate doc-format-sys
-```
-
-### 2. 安装依赖
-
-```bash
-pip install -r backend/requirements.txt -r backend/requirements-dev.txt
-```
-
-### 3. 启动服务
-
-```bash
+pip install -r backend/requirements.txt
 cd backend
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
-访问：
 - 接口文档：<http://127.0.0.1:8010/docs>
 - 健康检查：<http://127.0.0.1:8010/api/v1/health>
+
+### 前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+浏览器打开 <http://127.0.0.1:5173> 。
+
+页面保留原工作台能力：上传 `.doc` / `.docx`、选择文档类型（初步设计 / 可行性研究及代可研、代初设）、实时进度、下载结果、按同一文件查看转换历史。
 
 ### 4. 运行测试
 

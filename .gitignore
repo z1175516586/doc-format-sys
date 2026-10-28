@@ -1,3 +1,7 @@
+# Frontend
+node_modules/
+frontend/dist/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -221,3 +225,8 @@ __marimo__/
 
 utils/pandoc.exe
 template
+
+# 运行产物与本次变更中的临时文件
+backend/data/
+~$*
+test/261028093442_0da612.docx
