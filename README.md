@@ -43,8 +43,6 @@ doc-format-sys/
 ├── docs/                       # 文档
 │   ├── REFACTOR_PLAN.md        # 重构架构与迁移方案
 │   └── REFACTOR_CHANGELOG.md   # 重构变更记录
-├── template/                   # 内容模板（页眉页脚）
-│   └── archive/                # 旧封面模板归档
 └── test/                       # 回归样例（src.docx → obj.docx）
 ```
 

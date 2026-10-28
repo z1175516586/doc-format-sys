@@ -23,7 +23,7 @@ from typing import Callable
 from app.converters.base import DocConverter
 from app.converters.registry import get_converter
 from app.core.config import get_settings
-from app.core.constants import layout_rules
+from app.core.constants import cover_config, layout_rules
 from app.core.errors import AppError, LayoutError, UnsupportedFormatError
 from app.core.logging import get_logger
 from app.domain.ooxml.document import DocumentMerger, DocumentSplitter
@@ -35,14 +35,21 @@ from app.domain.ooxml.package import DocxPackage
 from app.domain.ooxml.pictures import PictureProcessor
 from app.domain.ooxml.repair import DocumentRepairer
 from app.domain.ooxml.sections import SectionProcessor
-from app.domain.ooxml.tables import TableFont, TableProcessor
-from app.domain.ooxml.toc import TocProcessor
+from app.domain.ooxml.styles import StyleProcessor
+from app.domain.ooxml.tables import TableProcessor
+from app.domain.ooxml.toc import TocProcessor, graft_refreshed_toc, strip_toc_leading_tabs
 from app.domain.ooxml.validate import StructuralValidator
 from app.schemas.document import ConvertOptions, FormatRequest, FormatResult, StepReport
 from app.services.cover_service import CoverService
 from app.services.template_service import TemplateService
 
 logger = get_logger(__name__)
+
+
+def _document_type_label(document_type: int) -> str:
+    types = cover_config()["document_types"]
+    spec = types.get(str(document_type)) or types["1"]
+    return f"{spec['primary']}{spec.get('secondary', '')}"
 
 ProgressCallback = Callable[[str, int, int, str], None]
 
@@ -87,6 +94,7 @@ class _PipelineState:
     toc_anchor: object | None = None
     first_table_row_height: int | None = None
     project_name: str | None = None
+    cover_section_count: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -259,14 +267,19 @@ class DocumentFormatService:
         if not state.options.apply_template:
             return {"skipped": True}
 
-        template_path = state.template_path or self.templates.default_template_path()
+        template_path = state.template_path or self.templates.builtin_content_template()
         if template_path is None:
-            state.warnings.append("未提供模板且无默认模板，已跳过页眉页脚移植")
+            state.warnings.append("未提供模板且无内置正文模板，已跳过样式移植")
             return {"skipped": True, "reason": "no_template"}
 
-        warnings = self.templates.apply_header_footer(self._pkg(state), template_path)
-        state.warnings.extend(warnings)
-        return {"template": template_path.name, "warnings": len(warnings)}
+        state.template_path = template_path
+        adopted = 0
+        with DocxPackage.open(template_path) as template:
+            adopted = StyleProcessor(self._pkg(state)).adopt_named_styles(
+                template,
+                list(layout_rules()["imported_styles"]),
+            )
+        return {"template": template_path.name, "styles": adopted}
 
     def _step_toc_cleanup(self, state: _PipelineState) -> dict[str, object]:
         removed = TocProcessor(self._pkg(state)).remove_toc_blocks()
@@ -307,7 +320,7 @@ class DocumentFormatService:
         元数据与设计人员表的来源，不再参与最终排版。
 
         当 ``use_cover_template=False``（例如单元测试用合成文档）时，
-        跳过模板替换，直接在原封面上做表清理/行高压缩/字体归一。
+        跳过模板替换，只清理标记前的多余表格。封面表格的字体和边框保持原样。
         """
         source_cover = self._require(state.cover, "封面包")
 
@@ -318,6 +331,8 @@ class DocumentFormatService:
             )
             state.cover = result.package
             state.warnings.extend(result.warnings)
+            if result.metadata.project_name:
+                state.project_name = result.metadata.project_name
             cover_info: dict[str, object] = {
                 "template": result.template_name,
                 "project_name": result.metadata.project_name,
@@ -333,14 +348,11 @@ class DocumentFormatService:
 
         tables = TableProcessor(state.cover)
         removed = tables.remove_tables_before_marker()
-        state.first_table_row_height = tables.shrink_first_table_rows()
-        runs = tables.apply_font_to_first_table(TableFont.from_config("table_cover"))
+        state.cover_section_count = len(state.cover.section_properties())
 
         return {
             **cover_info,
             "tables_removed": removed,
-            "font_runs": runs,
-            "original_row_height": state.first_table_row_height,
         }
 
     def _step_content(self, state: _PipelineState) -> dict[str, object]:
@@ -351,13 +363,13 @@ class DocumentFormatService:
         aligned = pictures.apply_alignment()
 
         tables = TableProcessor(content)
-        runs = tables.apply_font_to_all_tables(TableFont.from_config("table_default"))
+        laid_out = tables.apply_body_table_layout()
 
         return {
             "picture_paragraphs": pictures.count(),
             "indent_reset": reset,
             "pictures_aligned": aligned,
-            "table_font_runs": runs,
+            "tables_laid_out": laid_out,
         }
 
     def _step_merge(self, state: _PipelineState) -> dict[str, object]:
@@ -371,6 +383,8 @@ class DocumentFormatService:
 
         if report.warnings:
             state.warnings.extend(report.warnings)
+
+        self._apply_content_chrome(state)
 
         return {
             "appended_elements": report.appended_body_elements,
@@ -413,6 +427,7 @@ class DocumentFormatService:
     def _step_finalize(self, state: _PipelineState) -> dict[str, object]:
         pkg = self._pkg(state)
         tables = TableProcessor(pkg)
+        tables.apply_body_table_layout()
         restored = tables.restore_first_table_row_height(state.first_table_row_height)
         removed_keep = DocumentRepairer(pkg).remove_heading_keep_options()
 
@@ -423,6 +438,25 @@ class DocumentFormatService:
             "sections": len(sections),
             "landscape_sections": sum(1 for info in sections if info.is_landscape),
         }
+
+    def _apply_content_chrome(self, state: _PipelineState) -> None:
+        """合并后再套正文模板：页眉（含图标和横线）和标题样式以模板为准。
+
+        合并之前套页眉会被封面模板整包换掉，所以这一步放在合并之后。
+        """
+        if not state.options.apply_template:
+            return
+
+        template_path = state.template_path or self.templates.builtin_content_template()
+        if template_path is None:
+            return
+
+        pkg = self._pkg(state)
+        with DocxPackage.open(template_path) as template:
+            StyleProcessor(pkg).adopt_named_styles(
+                template,
+                list(layout_rules()["imported_styles"]),
+            )
 
     def _step_engine(self, state: _PipelineState) -> dict[str, object]:
         """交给排版引擎刷新域。
@@ -445,15 +479,42 @@ class DocumentFormatService:
 
         pkg = self._pkg(state)
         pkg.save(state.output_path)
-        refreshed = self.converter.refresh_fields(state.output_path)
+        backup = state.output_path.with_name(state.output_path.stem + ".before-refresh.docx")
+        shutil.copyfile(state.output_path, backup)
+        try:
+            refreshed = self.converter.refresh_fields(state.output_path)
+            if refreshed:
+                graft_refreshed_toc(backup, state.output_path)
+                strip_toc_leading_tabs(state.output_path)
+        finally:
+            backup.unlink(missing_ok=True)
         if not refreshed:
             state.warnings.append("域刷新未成功，目录页码可能仍是占位内容")
         return {"refreshed": refreshed}
 
     def _step_save(self, state: _PipelineState) -> dict[str, object]:
+        self._apply_body_header(state)
         pkg = self._pkg(state)
         saved = pkg.save(state.output_path)
         return {"path": str(saved), "size_bytes": saved.stat().st_size}
+
+    def _apply_body_header(self, state: _PipelineState) -> None:
+        """分节都稳定之后再套正文页眉，避免后插入的目录节没有页眉。"""
+        if not state.options.apply_template:
+            return
+        template_path = state.template_path or self.templates.builtin_content_template()
+        if template_path is None:
+            return
+        pkg = self._pkg(state)
+        warnings = self.templates.apply_body_header(
+            pkg,
+            template_path,
+            cover_sections=state.cover_section_count,
+        )
+        state.warnings.extend(warnings)
+        left = (state.project_name or "").replace("\n", "")
+        right = _document_type_label(state.options.document_type)
+        self.templates.fill_header_slots(pkg, left, right)
 
     def _step_validate(self, state: _PipelineState) -> dict[str, object]:
         """输出结构断言：不通过即判定失败，绝不静默交付坏文档。"""

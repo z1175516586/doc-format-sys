@@ -27,6 +27,14 @@
   },
   "format": {
     "title_spacing_keywords": ["初步设计", "可行性研究"],
-    "character_spacing_pt": 7.0
+    "character_spacing_pt": 7.0,
+    "library_number": {
+      "label_east_asia": "黑体",
+      "label_ascii": "黑体",
+      "value_east_asia": "Times New Roman",
+      "value_ascii": "Times New Roman",
+      "size_pt": 16.0,
+      "description": "库号：为黑体三号加粗，冒号后的编号为 Times New Roman 三号加粗"
+    }
   }
 }

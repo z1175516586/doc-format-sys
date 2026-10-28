@@ -13,11 +13,28 @@
       "description": "封面表格字体：宋体小五"
     }
   },
+  "content_template": "content_template.docx",
+  "imported_styles": ["Normal", "heading 1", "heading 2", "heading 3", "heading 4", "toc 1", "toc 2", "toc 3"],
+  "tables": {
+    "alignment": "center",
+    "line_twips": 240,
+    "line_rule": "auto",
+    "description": "正文表格只改行距为单倍、表格居中，不改字体和边框"
+  },
   "toc": {
     "default_title": "目      录",
     "keywords": ["目录", "目 录", "目      录", "Contents", "TABLE OF CONTENTS", "CONTENTS"],
     "levels": "1-3",
-    "description": "目录标题与识别关键词，levels 控制纳入目录的标题层级"
+    "description": "目录标题与识别关键词，levels 控制纳入目录的标题层级",
+    "fonts": {
+      "title_east_asia": "宋体",
+      "title_ascii": "宋体",
+      "title_bold": true,
+      "entry_east_asia": "宋体",
+      "entry_ascii": "Times New Roman",
+      "size_pt": 14.0,
+      "description": "目录标题与条目：宋体四号；引导点与页码走西文字体 Times New Roman 四号"
+    }
   },
   "cover": {
     "description": "封面规则已迁移至 backend/config/cover_config.json（模板与配置的单一来源）"

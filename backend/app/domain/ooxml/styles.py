@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from lxml import etree
 
+from app.core.constants import pt_to_half_points
 from app.core.namespaces import PART_STYLES, qn, w_attr
 from app.domain.ooxml.package import DocxPackage
 
@@ -132,6 +133,81 @@ class StyleProcessor:
         pstyle = paragraph.find(f"{qn('w:pPr')}/{qn('w:pStyle')}")
         return (pstyle.get(w_attr("val")) or "") if pstyle is not None else ""
 
+    def adopt_named_styles(self, source: DocxPackage, names: list[str]) -> int:
+        """用源文档里同名样式的定义覆盖目标样式，保留目标原有 styleId。
+
+        段落上的 pStyle 继续指向原来的 styleId，显示效果改成模板的字体、
+        字号和段距。同名样式有多份时全部覆盖，避免封面和正文各持一份旧定义。
+        """
+        if not source.has(PART_STYLES) or not self.pkg.has(PART_STYLES):
+            return 0
+
+        wanted = {name.lower() for name in names}
+        src_root = source.xml(PART_STYLES)
+        dst_root = self.pkg.xml(PART_STYLES)
+        adopted = 0
+
+        for style in src_root.findall(qn("w:style")):
+            name = _style_name(style)
+            if name.lower() not in wanted:
+                continue
+
+            matches = [item for item in dst_root.findall(qn("w:style")) if _style_name(item).lower() == name.lower()]
+            if not matches:
+                clone = etree.fromstring(etree.tostring(style))
+                dst_root.append(clone)
+                adopted += 1
+                continue
+
+            for existing in matches:
+                clone = etree.fromstring(etree.tostring(style))
+                style_id = existing.get(w_attr("styleId"))
+                if style_id:
+                    clone.set(w_attr("styleId"), style_id)
+                parent = existing.getparent()
+                if parent is not None:
+                    parent.replace(existing, clone)
+                    adopted += 1
+
+        if adopted:
+            self.resolver = StyleResolver(self.pkg)
+        return adopted
+
+    def apply_style_font(
+        self,
+        style_names: list[str],
+        *,
+        east_asia: str,
+        ascii_font: str,
+        size_pt: float,
+        bold: bool = False,
+    ) -> int:
+        """按样式名写入字体。用于目录样式：中文宋体，西文 Times New Roman。"""
+        if not self.pkg.has(PART_STYLES):
+            return 0
+
+        wanted = {name.lower() for name in style_names}
+        root = self.pkg.xml(PART_STYLES)
+        touched = 0
+        for style in root.findall(qn("w:style")):
+            if _style_name(style).lower() not in wanted:
+                continue
+            _write_style_font(style, east_asia, ascii_font, size_pt, bold)
+            touched += 1
+        return touched
+
+    @staticmethod
+    def clear_direct_run_font(paragraph: etree._Element) -> None:
+        """去掉段落 run 上的直接字体，让段落样式里的字体生效。"""
+        for run in paragraph.findall(qn("w:r")):
+            rpr = run.find(qn("w:rPr"))
+            if rpr is None:
+                continue
+            for tag in ("w:rFonts", "w:sz", "w:szCs"):
+                node = rpr.find(qn(tag))
+                if node is not None:
+                    rpr.remove(node)
+
     def clear_paragraph_style(self, paragraph: etree._Element) -> None:
         ppr = paragraph.find(qn("w:pPr"))
         if ppr is None:
@@ -149,3 +225,44 @@ class StyleProcessor:
             if style_id:
                 counts[style_id] = counts.get(style_id, 0) + 1
         return counts
+
+
+def _style_name(style: etree._Element) -> str:
+    name_el = style.find(qn("w:name"))
+    if name_el is None:
+        return ""
+    return name_el.get(w_attr("val")) or ""
+
+
+def _write_style_font(
+    style: etree._Element,
+    east_asia: str,
+    ascii_font: str,
+    size_pt: float,
+    bold: bool,
+) -> None:
+    rpr = style.find(qn("w:rPr"))
+    if rpr is None:
+        rpr = etree.SubElement(style, qn("w:rPr"))
+
+    fonts = rpr.find(qn("w:rFonts"))
+    if fonts is None:
+        fonts = etree.Element(qn("w:rFonts"))
+        rpr.insert(0, fonts)
+    fonts.set(w_attr("ascii"), ascii_font)
+    fonts.set(w_attr("hAnsi"), ascii_font)
+    fonts.set(w_attr("eastAsia"), east_asia)
+
+    size = str(pt_to_half_points(size_pt))
+    for tag in ("w:sz", "w:szCs"):
+        node = rpr.find(qn(tag))
+        if node is None:
+            node = etree.SubElement(rpr, qn(tag))
+        node.set(w_attr("val"), size)
+
+    for tag in ("w:b", "w:bCs"):
+        node = rpr.find(qn(tag))
+        if bold and node is None:
+            etree.SubElement(rpr, qn(tag))
+        if not bold and node is not None:
+            rpr.remove(node)

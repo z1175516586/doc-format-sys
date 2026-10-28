@@ -49,7 +49,6 @@ class CoverService:
         settings = get_settings()
         self.template_dir = Path(template_dir or settings.template_dir)
         self.resources_dir = Path(settings.resources_dir)
-        self.legacy_dir = Path(settings.legacy_template_dir)
         self.config = cover_config()
 
     # ------------------------------------------------------------------
@@ -69,9 +68,11 @@ class CoverService:
 
         processor.apply_stage(stage["primary"], stage["secondary"])
         replacements = processor.replace_fields(self._field_mapping(metadata))
+        processor.format_library_number()
         personnel = processor.replace_personnel(metadata.personnel)
         transplanted = processor.transplant_table_after_marker(source_cover)
         spacing = processor.apply_title_spacing()
+        processor.embed_images()
 
         logger.info(
             "封面已按模板 %s 重建：阶段=%s%s，字段 %d 处，人员 %d 位，表格移植=%s，字间距 %d 段",
@@ -117,10 +118,10 @@ class CoverService:
     # ------------------------------------------------------------------
     def _resolve_template(self) -> Path:
         name = self.config["template_name"]
-        for directory in (self.resources_dir, self.template_dir, self.legacy_dir):
+        for directory in (self.resources_dir, self.template_dir):
             candidate = directory / name
             if candidate.exists():
                 return candidate
         raise ValidationError(
-            f"封面模板缺失: {name}（已查找 {self.resources_dir} / {self.template_dir} / {self.legacy_dir}）"
+            f"封面模板缺失: {name}（已查找 {self.resources_dir} / {self.template_dir}）"
         )

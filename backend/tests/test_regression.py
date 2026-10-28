@@ -1,8 +1,8 @@
 """功能回归：test/src.docx 排版后与 test/obj.docx 做结构级对比。
 
 这是"重构必须复现原行为"的最终验收。依赖仓库根 test/ 下的真实样例
-（src.docx=源文档，obj.docx=目标文档）与 template/reference_content.docx
-（内容模板），三者缺一时自动跳过（CI 环境无样例文件）。
+（src.docx=源文档，obj.docx=目标文档），缺样例时自动跳过。
+页眉页脚模板不是运行必需项，测试不依赖 template/ 目录。
 """
 
 from __future__ import annotations
@@ -19,11 +19,10 @@ from app.services.format_service import DocumentFormatService
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = _REPO_ROOT / "test" / "src.docx"
 _OBJ = _REPO_ROOT / "test" / "obj.docx"
-_TPL = _REPO_ROOT / "template" / "reference_content.docx"
 
 pytestmark = pytest.mark.skipif(
-    not (_SRC.exists() and _OBJ.exists() and _TPL.exists()),
-    reason="缺少 test/src.docx、test/obj.docx 或 template/reference_content.docx，跳过回归比对",
+    not (_SRC.exists() and _OBJ.exists()),
+    reason="缺少 test/src.docx 或 test/obj.docx，跳过回归比对",
 )
 
 
@@ -32,7 +31,7 @@ def test_regression_matches_golden(tmp_path: Path) -> None:
     request = FormatRequest(
         source_path=str(_SRC),
         output_path=str(output),
-        template_path=str(_TPL),
+        template_path=None,
         options=ConvertOptions(),
     )
     result = DocumentFormatService(converter=NoopConverter()).format(request)

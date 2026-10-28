@@ -24,9 +24,9 @@ from typing import Iterator
 
 from lxml import etree
 
-from app.core.constants import cover_config
+from app.core.constants import cover_config, pt_to_half_points
 from app.core.logging import get_logger
-from app.core.namespaces import qn
+from app.core.namespaces import qn, w_attr
 from app.domain.ooxml.document import RelationshipRemapper, rewrite_relationship_ids
 from app.domain.ooxml.package import DocxPackage, element_text, paragraph_text
 
@@ -203,8 +203,8 @@ class CoverMetadataExtractor:
             if not stripped or stripped == project_name:
                 continue
             if self.company_suffix.search(stripped) and not self._pick_date(stripped):
-                merged = f"{stripped}{project_name}"
-                logger.info("封面项目名合并单位名: %s", merged)
+                merged = f"{stripped}\n{project_name}"
+                logger.info("封面项目名按两行合并: %s / %s", stripped, project_name)
                 return merged
         return project_name
 
@@ -298,10 +298,51 @@ class CoverProcessor:
         if updated == full:
             return 0
 
-        nodes[0].text = updated
+        if "\n" in updated:
+            self._write_lines(paragraph, nodes, updated.split("\n"))
+        else:
+            nodes[0].text = updated
+            for node in nodes[1:]:
+                node.text = ""
+        return 1
+
+    @staticmethod
+    def _write_lines(paragraph: etree._Element, nodes: list[etree._Element], lines: list[str]) -> None:
+        """把多行文本写进段落，行与行之间用换行符，不碰图形 run。"""
+        if not nodes:
+            return
+        first_run = nodes[0].getparent()
+        if first_run is None:
+            return
+
+        nodes[0].text = lines[0]
+        nodes[0].set(qn("xml:space"), "preserve")
         for node in nodes[1:]:
             node.text = ""
-        return 1
+
+        parent = first_run.getparent()
+        if parent is None:
+            return
+        index = parent.index(first_run)
+        rpr = first_run.find(qn("w:rPr"))
+
+        for line in lines[1:]:
+            break_run = etree.Element(qn("w:r"))
+            if rpr is not None:
+                break_run.append(etree.fromstring(etree.tostring(rpr)))
+            etree.SubElement(break_run, qn("w:br"))
+
+            text_run = etree.Element(qn("w:r"))
+            if rpr is not None:
+                text_run.append(etree.fromstring(etree.tostring(rpr)))
+            text_node = etree.SubElement(text_run, qn("w:t"))
+            text_node.set(qn("xml:space"), "preserve")
+            text_node.text = line
+
+            index += 1
+            parent.insert(index, break_run)
+            index += 1
+            parent.insert(index, text_run)
 
     @staticmethod
     def _text_nodes(paragraph: etree._Element) -> list[etree._Element]:
@@ -404,8 +445,82 @@ class CoverProcessor:
         return touched
 
     # ------------------------------------------------------------------
+    def embed_images(self) -> int:
+        """封面图片改为嵌入型（wp:inline），不再使用浮动锚定。"""
+        converted = 0
+        for drawing in self.pkg.body.iter(qn("w:drawing")):
+            if drawing.find(f".//{qn('a:blip')}") is None:
+                continue
+            anchor = drawing.find(qn("wp:anchor"))
+            if anchor is None:
+                continue
+            inline = etree.Element(qn("wp:inline"))
+            for tag in ("wp:extent", "wp:effectExtent", "wp:docPr", "wp:cNvGraphicFramePr", "a:graphic"):
+                node = anchor.find(qn(tag))
+                if node is not None:
+                    inline.append(node)
+            parent = anchor.getparent()
+            if parent is not None:
+                parent.replace(anchor, inline)
+                converted += 1
+        if converted:
+            logger.info("封面图片已改为嵌入型: %d 处", converted)
+        return converted
+
+    def format_library_number(self) -> bool:
+        """「库号：」黑体三号，编号 Times New Roman 三号。不改动同段里的图形。"""
+        spec = cover_config()["format"]["library_number"]
+        size = str(pt_to_half_points(float(spec["size_pt"])))
+
+        for paragraph in self._all_paragraphs():
+            nodes = self._text_nodes(paragraph)
+            if not nodes:
+                continue
+            full = "".join(node.text or "" for node in nodes)
+            match = re.search(r"(库号[:：])\s*(\S+)", full)
+            if not match:
+                continue
+
+            label, value = match.group(1), match.group(2)
+            first_run = nodes[0].getparent()
+            if first_run is None or first_run.getparent() is None:
+                continue
+
+            parent = first_run.getparent()
+            index = parent.index(first_run)
+            for node in nodes:
+                node.text = ""
+
+            label_run = _font_run(label, spec["label_east_asia"], spec["label_ascii"], size, bold=True)
+            value_run = _font_run(value, spec["value_east_asia"], spec["value_ascii"], size, bold=True)
+            parent.insert(index + 1, label_run)
+            parent.insert(index + 2, value_run)
+            logger.info("库号已按黑体 / Times New Roman 分开: %s%s", label, value)
+            return True
+
+        return False
+
     def body_text(self) -> str:
         return _compact(element_text(self.pkg.body))
+
+
+def _font_run(text: str, east_asia: str, ascii_font: str, size: str, *, bold: bool) -> etree._Element:
+    run = etree.Element(qn("w:r"))
+    rpr = etree.SubElement(run, qn("w:rPr"))
+    fonts = etree.SubElement(rpr, qn("w:rFonts"))
+    fonts.set(w_attr("ascii"), ascii_font)
+    fonts.set(w_attr("hAnsi"), ascii_font)
+    fonts.set(w_attr("eastAsia"), east_asia)
+    for tag in ("w:sz", "w:szCs"):
+        node = etree.SubElement(rpr, qn(tag))
+        node.set(w_attr("val"), size)
+    if bold:
+        etree.SubElement(rpr, qn("w:b"))
+        etree.SubElement(rpr, qn("w:bCs"))
+    text_node = etree.SubElement(run, qn("w:t"))
+    text_node.set(qn("xml:space"), "preserve")
+    text_node.text = text
+    return run
 
 
 def _inside_skipped(root: etree._Element, node: etree._Element) -> bool:

@@ -39,11 +39,8 @@ class Settings(BaseSettings):
     config_dir: Path = CONFIG_DIR
     log_dir: Path = LOG_DIR
     template_dir: Path = BACKEND_ROOT / "templates"
-    # 种子资源（随代码分发的内置资产，如封面模板），与用户上传模板分开存放
+    # 种子资源（随代码分发的内置资产，如封面与正文模板），与用户上传模板分开存放
     resources_dir: Path = BACKEND_ROOT / "resources"
-    # 迁移期兼容：旧版封面模板（reference_cover*.docx）仍放在仓库根 template/ 下。
-    # 新上传的模板统一存 backend/templates，找到即优先使用。
-    legacy_template_dir: Path = BACKEND_ROOT.parent / "template"
 
     # 上传限制
     max_upload_mb: int = 100

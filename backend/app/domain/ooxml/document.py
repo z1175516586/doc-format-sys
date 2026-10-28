@@ -25,6 +25,7 @@ from app.core.logging import get_logger
 from app.core.namespaces import PART_CONTENT_TYPES, PART_DOCUMENT, PART_DOCUMENT_RELS, PART_STYLES, R, qn, w_attr
 from app.domain.ooxml.package import DocxPackage, paragraph_text
 from app.domain.ooxml.styles import StyleResolver
+from app.domain.ooxml.toc import is_generated_toc_line
 
 logger = get_logger(__name__)
 
@@ -112,16 +113,20 @@ class DocumentSplitter:
             style_el = child.find(f"{qn('w:pPr')}/{qn('w:pStyle')}")
             if style_el is None:
                 continue
-            if resolver.is_heading(style_el.get(w_attr("val")) or ""):
-                return index
+            style_id = style_el.get(w_attr("val")) or ""
+            if not resolver.is_heading(style_id):
+                continue
+            if is_generated_toc_line(paragraph_text(child)):
+                continue
+            return index
 
-        # 退路：第一个非空且带编号特征的段落（标题识别未命中时）
+        # 退路：第一个编号标题。旧目录行（末尾粘着页码）不算正文起点。
         for index in range(start, len(children)):
             child = children[index]
             if child.tag != qn("w:p"):
                 continue
             text = paragraph_text(child)
-            if text and text[0].isdigit():
+            if text and text[0].isdigit() and not is_generated_toc_line(text):
                 return index
         return None
 
@@ -437,27 +442,30 @@ class DocumentMerger:
         self._demote_trailing_section_properties(base_body)
 
         # 2. 追加 source 正文（不含其末尾 sectPr）
+        #    关系 ID 只改追加进来的内容。封面里的图标如果被一起改写，
+        #    r:embed 会指到正文的页眉或尾注，左上角公司图标就显示不出来。
         appended = 0
+        appended_nodes: list[etree._Element] = []
         for child in list(source_body):
             if child.tag == qn("w:sectPr"):
                 continue
             cloned = deepcopy(child)
             base_body.append(cloned)
+            appended_nodes.append(cloned)
             appended += 1
         report.appended_body_elements = appended
 
         # 3. 把 source 的末尾 sectPr 作为整篇的新结束节属性
         source_sect = source_body.find(qn("w:sectPr"))
         if source_sect is not None:
-            base_body.append(deepcopy(source_sect))
+            cloned_sect = deepcopy(source_sect)
+            base_body.append(cloned_sect)
+            appended_nodes.append(cloned_sect)
         else:
             report.warnings.append("被追加文档缺少末尾 sectPr，页面设置可能沿用前一节")
 
-        # 4. 重写所有 r:id 引用
-        report.rewritten_references = rewrite_relationship_ids(
-            [base_body],
-            mapping,
-        )
+        # 4. 只重写追加内容里的 r:id
+        report.rewritten_references = rewrite_relationship_ids(appended_nodes, mapping)
 
         report.final_sections = len(self.base.section_properties())
         logger.info(
@@ -480,20 +488,60 @@ class DocumentMerger:
             return 0
 
         base_root = self.base.xml(PART_STYLES)
-        known = {
-            style.get(w_attr("styleId"))
+        base_by_id = {
+            style.get(w_attr("styleId")): style
             for style in base_root.findall(qn("w:style"))
+            if style.get(w_attr("styleId"))
         }
+        used_ids = set(base_by_id)
 
         source_root = source.xml(PART_STYLES)
         merged = 0
+        rename: dict[str, str] = {}
+
         for style in source_root.findall(qn("w:style")):
             style_id = style.get(w_attr("styleId"))
-            if not style_id or style_id in known:
+            if not style_id:
                 continue
-            base_root.append(deepcopy(style))
-            known.add(style_id)
+
+            existing = base_by_id.get(style_id)
+            if existing is None:
+                base_root.append(deepcopy(style))
+                base_by_id[style_id] = style
+                used_ids.add(style_id)
+                merged += 1
+                continue
+
+            # 同一个 styleId 在封面和正文里可能不是同一个样式。
+            # 例如正文的 "1" 是标题一，封面的 "1" 是正文。这时必须换一个 id，
+            # 否则正文标题会被封面的正文样式盖掉。
+            if _style_display_name(existing) == _style_display_name(style):
+                imported = {name.lower() for name in layout_rules().get("imported_styles", [])}
+                if _style_display_name(existing) in imported:
+                    clone = deepcopy(style)
+                    clone.set(w_attr("styleId"), style_id)
+                    parent = existing.getparent()
+                    if parent is not None:
+                        parent.replace(existing, clone)
+                        base_by_id[style_id] = clone
+                        merged += 1
+                continue
+
+            new_id = style_id
+            suffix = 1
+            while new_id in used_ids:
+                new_id = f"{style_id}_{suffix}"
+                suffix += 1
+            clone = deepcopy(style)
+            clone.set(w_attr("styleId"), new_id)
+            base_root.append(clone)
+            used_ids.add(new_id)
+            rename[style_id] = new_id
             merged += 1
+
+        if rename:
+            _rewrite_style_ids(source.body, rename)
+            logger.info("样式 ID 冲突已重映射 %d 处", len(rename))
 
         if merged:
             logger.info("合并样式 %d 条", merged)
@@ -510,3 +558,21 @@ class DocumentMerger:
         paragraph = etree.SubElement(body, qn("w:p"))
         ppr = etree.SubElement(paragraph, qn("w:pPr"))
         ppr.append(last)
+
+
+def _style_display_name(style: etree._Element) -> str:
+    name_el = style.find(qn("w:name"))
+    if name_el is None:
+        return ""
+    return (name_el.get(w_attr("val")) or "").lower()
+
+
+def _rewrite_style_ids(root: etree._Element, rename: dict[str, str]) -> None:
+    """把段落、字符、表格样式引用改到新的 styleId。"""
+    tags = {qn("w:pStyle"), qn("w:rStyle"), qn("w:tblStyle")}
+    for node in root.iter():
+        if node.tag not in tags:
+            continue
+        value = node.get(w_attr("val")) or ""
+        if value in rename:
+            node.set(w_attr("val"), rename[value])

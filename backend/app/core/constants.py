@@ -39,10 +39,30 @@ DEFAULT_LAYOUT_RULES: dict[str, Any] = {
         "table_default": {"east_asia": "宋体", "ascii": "宋体", "size_pt": 14.0},
         "table_cover": {"east_asia": "宋体", "ascii": "宋体", "size_pt": 9.0},
     },
+    "content_template": "content_template.docx",
+    "imported_styles": [
+        "Normal",
+        "heading 1",
+        "heading 2",
+        "heading 3",
+        "heading 4",
+        "toc 1",
+        "toc 2",
+        "toc 3",
+    ],
+    "tables": {"alignment": "center", "line_twips": 240, "line_rule": "auto"},
     "toc": {
         "default_title": "目      录",
         "keywords": ["目录", "目 录", "目      录", "Contents", "TABLE OF CONTENTS", "CONTENTS"],
         "levels": "1-3",
+        "fonts": {
+            "title_east_asia": "宋体",
+            "title_ascii": "宋体",
+            "title_bold": True,
+            "entry_east_asia": "宋体",
+            "entry_ascii": "Times New Roman",
+            "size_pt": 14.0,
+        },
     },
     "headings": {
         "max_level": 4,
@@ -118,6 +138,13 @@ DEFAULT_COVER_CONFIG: dict[str, Any] = {
     "format": {
         "title_spacing_keywords": ["初步设计", "可行性研究"],
         "character_spacing_pt": 7.0,
+        "library_number": {
+            "label_east_asia": "黑体",
+            "label_ascii": "黑体",
+            "value_east_asia": "Times New Roman",
+            "value_ascii": "Times New Roman",
+            "size_pt": 16.0,
+        },
     },
 }
 

@@ -12,20 +12,33 @@ service/converter.py 的 step4_1_insert_toc_after_cover。
 from __future__ import annotations
 
 import re
+import zipfile
 
 from lxml import etree
 
-from app.core.constants import layout_rules
+from pathlib import Path
+
+from app.core.constants import layout_rules, pt_to_half_points
 from app.core.logging import get_logger
-from app.core.namespaces import qn, w_attr
+from app.core.namespaces import PART_STYLES, qn, w_attr
 from app.domain.ooxml.package import DocxPackage, paragraph_text
-from app.domain.ooxml.styles import StyleResolver
+from app.domain.ooxml.styles import StyleProcessor, StyleResolver
 
 logger = get_logger(__name__)
 
 _TOC_FIELD_INSTR = ' TOC \\o "{levels}" \\h \\z \\u '
 _PLACEHOLDER_TEXT = "按 F9 更新目录"
 _TOC_TITLE_SEARCH = re.compile(r"目\s*录")
+# 旧目录行：编号后粘着页码，如 "1 总论1"、"1.1项目背景3"。正文标题 "1 总论" 不以数字结尾。
+_TOC_ENTRY_LINE = re.compile(r"^\d+(?:\.\d+)*\D+\d+$")
+
+
+def is_generated_toc_line(text: str) -> bool:
+    """判断一段是不是旧目录条目（编号标题后面直接粘着页码）。"""
+    compact = re.sub(r"\s+", "", text or "")
+    if not compact or len(compact) > 40:
+        return False
+    return _TOC_ENTRY_LINE.fullmatch(compact) is not None
 
 
 class TocProcessor:
@@ -72,8 +85,44 @@ class TocProcessor:
             parent.remove(sdt)
             removed += 1
 
+        removed += self._remove_plain_toc_entries()
+
         if removed:
-            logger.info("移除已有自动目录 %d 处（保留分节符）", removed)
+            logger.info("移除已有目录 %d 处（保留分节符与正文标题）", removed)
+        return removed
+
+    def _remove_plain_toc_entries(self) -> int:
+        """删掉「目录」标题后面、正文标题前面的纯文本目录行。
+
+        这些行不是内容控件，形如 "1 总论1"。不能按标题文字去删，
+        正文里的 "1 总论" 不以页码结尾，会留在原地。
+        """
+        body = self.pkg.body
+        removing = False
+        removed = 0
+
+        for child in list(body):
+            if child.tag != qn("w:p"):
+                if removing:
+                    removing = False
+                continue
+
+            text = paragraph_text(child)
+            compact = re.sub(r"\s+", "", text)
+            if compact and _TOC_TITLE_SEARCH.fullmatch(compact):
+                removing = True
+                continue
+
+            if not removing:
+                continue
+
+            if not text or is_generated_toc_line(text):
+                body.remove(child)
+                removed += 1
+                continue
+
+            removing = False
+
         return removed
 
     def remove_content_controls(self) -> int:
@@ -165,6 +214,8 @@ class TocProcessor:
             logger.warning("未找到一级标题，无法插入目录")
             return False
 
+        self.apply_entry_fonts()
+        self.flatten_entry_indents()
         title_para = self._build_title_paragraph(toc_title)
         field_para = self._build_toc_field_paragraph(toc_levels)
 
@@ -184,14 +235,43 @@ class TocProcessor:
             style_id = style_el.get(w_attr("val")) or ""
             if not resolver.is_heading(style_id):
                 continue
-            # 跳过目录自身
-            if paragraph_text(paragraph) in ("", "目录"):
+            text = paragraph_text(paragraph)
+            if text in ("", "目录") or is_generated_toc_line(text):
                 continue
             return paragraph
         return None
 
-    @staticmethod
-    def _build_title_paragraph(title: str) -> etree._Element:
+    def flatten_entry_indents(self) -> int:
+        """目录条目左侧顶格，不按级别缩进。"""
+        if not self.pkg.has(PART_STYLES):
+            return 0
+
+        root = self.pkg.xml(PART_STYLES)
+        touched = 0
+        for style in root.findall(qn("w:style")):
+            name_el = style.find(qn("w:name"))
+            name = (name_el.get(w_attr("val")) if name_el is not None else "") or ""
+            if not name.lower().startswith("toc "):
+                continue
+            _force_left_flush(_ensure_ppr(style))
+            touched += 1
+        return touched
+
+    def apply_entry_fonts(self) -> int:
+        """目录条目样式：中文宋体四号，西文（引导点、页码）Times New Roman 四号。"""
+        fonts = layout_rules()["toc"]["fonts"]
+        return StyleProcessor(self.pkg).apply_style_font(
+            ["toc 1", "toc 2", "toc 3"],
+            east_asia=fonts["entry_east_asia"],
+            ascii_font=fonts["entry_ascii"],
+            size_pt=float(fonts["size_pt"]),
+            bold=False,
+        )
+
+    def _build_title_paragraph(self, title: str) -> etree._Element:
+        fonts = layout_rules()["toc"]["fonts"]
+        size = str(pt_to_half_points(float(fonts["size_pt"])))
+
         p = etree.Element(qn("w:p"))
         ppr = etree.SubElement(p, qn("w:pPr"))
         jc = etree.SubElement(ppr, qn("w:jc"))
@@ -199,7 +279,17 @@ class TocProcessor:
 
         run = etree.SubElement(p, qn("w:r"))
         rpr = etree.SubElement(run, qn("w:rPr"))
-        etree.SubElement(rpr, qn("w:b"))
+        rfonts = etree.SubElement(rpr, qn("w:rFonts"))
+        rfonts.set(w_attr("ascii"), fonts["title_ascii"])
+        rfonts.set(w_attr("hAnsi"), fonts["title_ascii"])
+        rfonts.set(w_attr("eastAsia"), fonts["title_east_asia"])
+        for tag in ("w:sz", "w:szCs"):
+            node = etree.SubElement(rpr, qn(tag))
+            node.set(w_attr("val"), size)
+        if fonts.get("title_bold", True):
+            etree.SubElement(rpr, qn("w:b"))
+            etree.SubElement(rpr, qn("w:bCs"))
+
         text = etree.SubElement(run, qn("w:t"))
         text.set(qn("xml:space"), "preserve")
         text.text = title
@@ -240,3 +330,172 @@ class TocProcessor:
             if instr.text and "TOC" in instr.text.upper():
                 return True
         return False
+
+
+def graft_refreshed_toc(base_path: Path, refreshed_path: Path) -> str:
+    """域刷新若丢掉图片，就把刷新后的目录块嫁接回刷新前的文档。
+
+    LibreOffice 的整包 store 曾经把 word/media 清空。刷新前的包里图片、
+    页眉和封面都在，只缺展开后的目录。目录块从刷新结果里取回来写回原包。
+    """
+    base_media = _count_media(base_path)
+    refreshed_media = _count_media(refreshed_path)
+    if base_media == 0 or refreshed_media >= base_media:
+        return "refresh_kept"
+
+    with DocxPackage.open(refreshed_path) as refreshed:
+        payloads = [etree.tostring(element) for element in _toc_result_elements(refreshed)]
+
+    if not payloads:
+        logger.warning("域刷新后图片减少，但没有可嫁接的目录块")
+        return "no_toc_result"
+
+    with DocxPackage.open(base_path) as base:
+        if not _replace_toc_anchor(base, payloads):
+            logger.warning("域刷新后图片减少，原文档里没有 TOC 域可替换")
+            return "no_anchor"
+        base.save(refreshed_path)
+
+    logger.info(
+        "目录已从刷新结果嫁接回原文档（图片 %d → 刷新后 %d）",
+        base_media,
+        refreshed_media,
+    )
+    return "grafted"
+
+
+def strip_toc_leading_tabs(path: Path) -> int:
+    """成品目录里，标题文字前面的制表符删掉。页码前的引导点保留。"""
+    if not path.is_file():
+        return 0
+    removed = 0
+    with DocxPackage.open(path) as pkg:
+        styled = TocProcessor(pkg).flatten_entry_indents()
+        targets = _toc_result_elements(pkg)
+        if not targets and not styled:
+            return 0
+        for element in targets:
+            before = len(list(element.iter(qn("w:tab"))))
+            _flatten_toc_paragraphs(element)
+            after = len(list(element.iter(qn("w:tab"))))
+            removed += before - after
+        pkg.save(path)
+    return removed
+
+
+def _count_media(path: Path) -> int:
+    with zipfile.ZipFile(path) as archive:
+        return sum(1 for name in archive.namelist() if name.startswith("word/media/"))
+
+
+def _toc_result_elements(pkg: DocxPackage) -> list[etree._Element]:
+    """取出刷新后的目录块：优先内容控件，否则取带 PAGEREF 的段落。"""
+    body = pkg.body
+    for child in body:
+        if child.tag == qn("w:sdt") and TocProcessor._is_toc_sdt(child):
+            return [child]
+
+    found: list[etree._Element] = []
+    for child in body:
+        if child.tag != qn("w:p"):
+            continue
+        instructions = "".join(node.text or "" for node in child.iter(qn("w:instrText")))
+        if "PAGEREF" in instructions.upper() or "HYPERLINK" in instructions.upper():
+            found.append(child)
+    return found
+
+
+def _replace_toc_anchor(pkg: DocxPackage, payloads: list[bytes]) -> bool:
+    anchor = None
+    for paragraph in pkg.body.iter(qn("w:p")):
+        for instr in paragraph.iter(qn("w:instrText")):
+            if instr.text and "TOC" in instr.text.upper() and "PAGEREF" not in instr.text.upper():
+                anchor = paragraph
+                break
+        if anchor is not None:
+            break
+
+    if anchor is None:
+        return False
+
+    parent = anchor.getparent()
+    if parent is None:
+        return False
+
+    index = parent.index(anchor)
+    for offset, payload in enumerate(payloads):
+        element = etree.fromstring(payload)
+        # 刷新结果里的目录块可能夹着分节符，那些页眉页脚关系在原文档里不存在。
+        for sect in list(element.iter(qn("w:sectPr"))):
+            owner = sect.getparent()
+            if owner is not None:
+                owner.remove(sect)
+        _flatten_toc_paragraphs(element)
+        parent.insert(index + offset, element)
+    parent.remove(anchor)
+    return True
+
+
+def _ensure_ppr(style: etree._Element) -> etree._Element:
+    ppr = style.find(qn("w:pPr"))
+    if ppr is None:
+        ppr = etree.SubElement(style, qn("w:pPr"))
+    return ppr
+
+
+def _drop_indent_tab_stops(ppr: etree._Element) -> None:
+    """去掉把标题往右推的左侧制表位，保留页码前的右对齐引导点。"""
+    tabs = ppr.find(qn("w:tabs"))
+    if tabs is None:
+        return
+    for tab in list(tabs.findall(qn("w:tab"))):
+        kind = (tab.get(w_attr("val")) or "").lower()
+        if kind != "right":
+            tabs.remove(tab)
+    if len(tabs) == 0:
+        ppr.remove(tabs)
+
+
+def _drop_leading_tabs(paragraph: etree._Element) -> None:
+    """删掉标题文字前面的制表符。页码前面的引导点制表符留着。"""
+    seen_text = False
+    for node in list(paragraph.iter()):
+        if node.tag == qn("w:t") and (node.text or "").strip():
+            seen_text = True
+            continue
+        if node.tag == qn("w:tab") and not seen_text:
+            parent = node.getparent()
+            # 只删运行里的制表符。w:tabs 里的 w:tab 是制表位，不是字符。
+            if parent is not None and parent.tag == qn("w:r"):
+                parent.remove(node)
+
+
+def _force_left_flush(ppr: etree._Element) -> None:
+    """段落顶格、左对齐。"""
+    ind = ppr.find(qn("w:ind"))
+    if ind is None:
+        ind = etree.SubElement(ppr, qn("w:ind"))
+    for attr in ("start", "startChars"):
+        if w_attr(attr) in ind.attrib:
+            del ind.attrib[w_attr(attr)]
+    for attr in ("left", "leftChars", "firstLine", "firstLineChars", "hanging", "hangingChars"):
+        ind.set(w_attr(attr), "0")
+    jc = ppr.find(qn("w:jc"))
+    if jc is None:
+        jc = etree.SubElement(ppr, qn("w:jc"))
+    jc.set(w_attr("val"), "left")
+    _drop_indent_tab_stops(ppr)
+
+
+def _flatten_toc_paragraphs(root: etree._Element) -> None:
+    """刷新后的目录条目去掉直接缩进，左侧顶格。目录标题保持居中。"""
+    for paragraph in root.iter(qn("w:p")):
+        compact = re.sub(r"\s+", "", paragraph_text(paragraph))
+        if compact and _TOC_TITLE_SEARCH.fullmatch(compact):
+            continue
+        ppr = paragraph.find(qn("w:pPr"))
+        if ppr is None:
+            ppr = etree.Element(qn("w:pPr"))
+            paragraph.insert(0, ppr)
+        _force_left_flush(ppr)
+        _drop_leading_tabs(paragraph)

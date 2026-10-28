@@ -26,6 +26,7 @@ from app.core.logging import get_logger
 from app.core.namespaces import NSMAP, qn, w_attr
 from app.domain.ooxml.package import DocxPackage, paragraph_text
 from app.domain.ooxml.styles import StyleProcessor
+from app.domain.ooxml.toc import is_generated_toc_line
 
 logger = get_logger(__name__)
 
@@ -38,6 +39,15 @@ _TOC_PATTERN = re.compile(r"目[\s\t]*录")
 
 # 中文括号平衡校验用
 _BRACKETS = (("(", ")"), ("（", "）"))
+
+
+def _inside_table(paragraph: etree._Element) -> bool:
+    current = paragraph.getparent()
+    while current is not None:
+        if current.tag == qn("w:tbl"):
+            return True
+        current = current.getparent()
+    return False
 
 
 def is_valid_heading_order(prev_number: str, curr_number: str) -> bool:
@@ -118,20 +128,21 @@ class HeadingProcessor:
     def apply_heading_styles(self) -> HeadingReport:
         """识别并标注标题。
 
-        规则链（与原实现逐条对应）：
-        1. 目录之前不处理
-        2. 跳过第一个 "1" 级标题（通常是旧目录里的第一条，或正文首页大标题）
-        3. 从第二个 "1" 级标题开始正式处理
-        4. 编号顺序不合法 → 视为正文
-        5. 括号不平衡 → 视为正文
-        6. 含 w:pict 的段落（文本框/图）→ 视为正文
-        7. 反向纠错：已是标题样式但文本不符合编号规则 → 还原为正文
+        规则链：
+        1. 目录标题之前不处理
+        2. 旧目录行（编号后直接粘着页码，如 "1 总论1"）不处理
+        3. 编号顺序不合法 → 视为正文
+        4. 括号不平衡 → 视为正文
+        5. 含 w:pict 的段落（文本框/图）→ 视为正文
+        6. 反向纠错：已是标题样式但文本不符合编号规则 → 还原为正文
+
+        不再跳过第一个一级标题。旧目录已经按结构删掉，
+        正文里的 "1 总论" 就是第一个一级标题，跳过会导致它进不了目录。
         """
         report = HeadingReport()
+        self._exclude_table_paragraphs()
 
         after_toc = False
-        level1_count = 0
-        processing_enabled = False
         prev_number: str | None = None
 
         paragraphs = self.pkg.paragraphs()
@@ -142,9 +153,12 @@ class HeadingProcessor:
                 continue
 
             if not after_toc:
-                if _TOC_PATTERN.search(text):
+                if _TOC_PATTERN.search(text) and not is_generated_toc_line(text):
                     after_toc = True
                     logger.debug("识别到目录段落: %s", text[:30])
+                continue
+
+            if is_generated_toc_line(text):
                 continue
 
             # 含图形对象的段落不参与标题识别
@@ -162,26 +176,9 @@ class HeadingProcessor:
             number = match.group(1)
             level = number.count(".") + 1
 
-            # 定位正文起点：跳过第 1 个一级标题，处理从第 2 个开始
-            if not processing_enabled:
-                if number == "1" and level == 1:
-                    level1_count += 1
-                    if level1_count == 1:
-                        report.skipped_first_level1.append(text[:40])
-                        continue
-                    processing_enabled = True
-                    prev_number = None
-                else:
-                    continue
-
             if prev_number is not None and not is_valid_heading_order(prev_number, number):
                 report.invalid_order.append(f"{number} (前 {prev_number})")
-                self.styles.set_paragraph_style(
-                    paragraph,
-                    self._normal_style_id(),
-                    space_before_pt=self.space_before,
-                    space_after_pt=self.space_after,
-                )
+                self.styles.set_paragraph_style(paragraph, self._normal_style_id())
                 continue
 
             style_id = self._style_for_level(level)
@@ -189,12 +186,9 @@ class HeadingProcessor:
                 report.notes.append(f"样式表缺少 Heading {level}，跳过: {text[:30]}")
                 continue
 
-            self.styles.set_paragraph_style(
-                paragraph,
-                style_id,
-                space_before_pt=self.space_before,
-                space_after_pt=self.space_after,
-            )
+            self.styles.set_paragraph_style(paragraph, style_id)
+            self.styles.clear_direct_run_font(paragraph)
+            self._clear_direct_paragraph_layout(paragraph)
             report.detected += 1
             report.levels[level] = report.levels.get(level, 0) + 1
             prev_number = number
@@ -215,6 +209,46 @@ class HeadingProcessor:
         return report
 
     # ------------------------------------------------------------------
+    def _exclude_table_paragraphs(self) -> None:
+        """表格里的文字不参与标题识别，也不进入目录。
+
+        有的表格单元格写成 "1.1 xxx"。若保留标题样式或大纲级别，
+        目录会把它们收进去，正文标题的顺序也会被打乱。
+        """
+        normal = self._normal_style_id()
+        for paragraph in self.pkg.body.iter(qn("w:p")):
+            if not _inside_table(paragraph):
+                continue
+            style_id = self.styles.paragraph_style_id(paragraph)
+            if style_id and self.styles.resolver.is_heading(style_id):
+                self.styles.set_paragraph_style(paragraph, normal)
+            ppr = paragraph.find(qn("w:pPr"))
+            if ppr is None:
+                ppr = etree.Element(qn("w:pPr"))
+                paragraph.insert(0, ppr)
+            # 显式降为正文大纲，避免「标题」样式的继承把表格行收进目录
+            outline = ppr.find(qn("w:outlineLvl"))
+            if outline is None:
+                outline = etree.SubElement(ppr, qn("w:outlineLvl"))
+            outline.set(w_attr("val"), "9")
+
+    @staticmethod
+    def _clear_direct_paragraph_layout(paragraph: etree._Element) -> None:
+        """去掉段落上的直接缩进和段距，让模板样式里的定义生效。"""
+        ppr = paragraph.find(qn("w:pPr"))
+        if ppr is None:
+            ppr = etree.Element(qn("w:pPr"))
+            paragraph.insert(0, ppr)
+        spacing = ppr.find(qn("w:spacing"))
+        if spacing is not None:
+            ppr.remove(spacing)
+        ind = ppr.find(qn("w:ind"))
+        if ind is not None:
+            ppr.remove(ind)
+        ind = etree.SubElement(ppr, qn("w:ind"))
+        for attr in ("left", "leftChars", "firstLine", "firstLineChars", "hanging", "hangingChars"):
+            ind.set(w_attr(attr), "0")
+
     def _normal_style_id(self) -> str:
         return self.styles.resolver.id_of("normal") or self.styles.resolver.id_of("正文") or "Normal"
 
@@ -228,12 +262,7 @@ class HeadingProcessor:
             if _HEADING_PATTERN.match(paragraph_text(paragraph)):
                 continue
 
-            self.styles.set_paragraph_style(
-                paragraph,
-                self._normal_style_id(),
-                space_before_pt=self.space_before,
-                space_after_pt=self.space_after,
-            )
+            self.styles.set_paragraph_style(paragraph, self._normal_style_id())
             corrected += 1
         return corrected
 

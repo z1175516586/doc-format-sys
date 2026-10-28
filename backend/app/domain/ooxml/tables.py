@@ -56,6 +56,47 @@ class TableProcessor:
             return 0
         return self._apply_font(tables[0], font)
 
+    def apply_body_table_layout(self) -> int:
+        """正文表格只做两件事：整表居中、单元格段落单倍行距。
+
+        不改字体，不改边框。字体和边框保持原稿。
+        """
+        rules = layout_rules()["tables"]
+        alignment = rules["alignment"]
+        line = str(int(rules["line_twips"]))
+        line_rule = rules["line_rule"]
+        count = 0
+
+        for table in self.pkg.tables():
+            self._set_table_alignment(table, alignment)
+            self._set_table_line_spacing(table, line, line_rule)
+            count += 1
+
+        logger.info("正文表格已居中并设为单倍行距: %d 张", count)
+        return count
+
+    def _set_table_alignment(self, table: etree._Element, alignment: str) -> None:
+        tbl_pr = table.find(qn("w:tblPr"))
+        if tbl_pr is None:
+            tbl_pr = etree.Element(qn("w:tblPr"))
+            table.insert(0, tbl_pr)
+        jc = tbl_pr.find(qn("w:jc"))
+        if jc is None:
+            jc = etree.SubElement(tbl_pr, qn("w:jc"))
+        jc.set(w_attr("val"), alignment)
+
+    def _set_table_line_spacing(self, table: etree._Element, line: str, line_rule: str) -> None:
+        for paragraph in table.iter(qn("w:p")):
+            ppr = paragraph.find(qn("w:pPr"))
+            if ppr is None:
+                ppr = etree.Element(qn("w:pPr"))
+                paragraph.insert(0, ppr)
+            spacing = ppr.find(qn("w:spacing"))
+            if spacing is None:
+                spacing = etree.SubElement(ppr, qn("w:spacing"))
+            spacing.set(w_attr("line"), line)
+            spacing.set(w_attr("lineRule"), line_rule)
+
     def apply_font_to_all_tables(self, font: TableFont) -> int:
         total = 0
         for table in self.pkg.tables():
