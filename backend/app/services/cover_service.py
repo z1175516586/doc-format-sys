@@ -72,7 +72,7 @@ class CoverService:
         personnel = processor.replace_personnel(metadata.personnel)
         transplanted = processor.transplant_table_after_marker(source_cover)
         spacing = processor.apply_title_spacing()
-        processor.embed_images()
+        processor.keep_second_logo_on_next_page()
 
         logger.info(
             "封面已按模板 %s 重建：阶段=%s%s，字段 %d 处，人员 %d 位，表格移植=%s，字间距 %d 段",

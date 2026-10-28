@@ -444,28 +444,33 @@ class CoverProcessor:
 
         return touched
 
-    # ------------------------------------------------------------------
-    def embed_images(self) -> int:
-        """封面图片改为嵌入型（wp:inline），不再使用浮动锚定。"""
-        converted = 0
-        for drawing in self.pkg.body.iter(qn("w:drawing")):
-            if drawing.find(f".//{qn('a:blip')}") is None:
+    def keep_second_logo_on_next_page(self) -> bool:
+        """第二页左上角标志从新的一页开始。
+
+        模板里它锚在「库号」后的空段，垂直偏移只有约 0.5 英寸，
+        靠前面的段落把这段顶到第二页。副标题被删掉后这段会留在第一页，
+        标志就跟着出现在第一页。
+        """
+        seen = 0
+        for paragraph in self.pkg.body.iter(qn("w:p")):
+            if not _paragraph_has_logo(paragraph):
                 continue
-            anchor = drawing.find(qn("wp:anchor"))
-            if anchor is None:
+            seen += 1
+            if seen < 2:
                 continue
-            inline = etree.Element(qn("wp:inline"))
-            for tag in ("wp:extent", "wp:effectExtent", "wp:docPr", "wp:cNvGraphicFramePr", "a:graphic"):
-                node = anchor.find(qn(tag))
-                if node is not None:
-                    inline.append(node)
-            parent = anchor.getparent()
-            if parent is not None:
-                parent.replace(anchor, inline)
-                converted += 1
-        if converted:
-            logger.info("封面图片已改为嵌入型: %d 处", converted)
-        return converted
+            ppr = paragraph.find(qn("w:pPr"))
+            if ppr is None:
+                ppr = etree.Element(qn("w:pPr"))
+                paragraph.insert(0, ppr)
+            node = ppr.find(qn("w:pageBreakBefore"))
+            if node is None:
+                node = etree.Element(qn("w:pageBreakBefore"))
+                ppr.append(node)
+            if (node.get(w_attr("val")) or "").lower() in ("0", "false", "off"):
+                del node.attrib[w_attr("val")]
+            logger.info("封面第二页标志已固定到新页")
+            return True
+        return False
 
     def format_library_number(self) -> bool:
         """「库号：」黑体三号，编号 Times New Roman 三号。不改动同段里的图形。"""
@@ -521,6 +526,14 @@ def _font_run(text: str, east_asia: str, ascii_font: str, size: str, *, bold: bo
     text_node.set(qn("xml:space"), "preserve")
     text_node.text = text
     return run
+
+
+def _paragraph_has_logo(paragraph: etree._Element) -> bool:
+    """封面左上角公司标志。模板里 docPr 的描述是 LOGO1。"""
+    for docpr in paragraph.iter(qn("wp:docPr")):
+        if (docpr.get("descr") or "") == "LOGO1":
+            return True
+    return False
 
 
 def _inside_skipped(root: etree._Element, node: etree._Element) -> bool:
