@@ -58,8 +58,11 @@ doc-format-sys/
 conda activate doc-format-sys
 pip install -r backend/requirements.txt
 cd backend
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+python -m app
 ```
+
+开发默认热重载：改 `app/` 或 `config/` 会自动重启。主机、端口、是否重载见 `backend/config/server.json`。
+正在跑转换任务时不要存代码，重载会把进行中的任务杀掉。
 
 - 接口文档：<http://127.0.0.1:8010/docs>
 - 健康检查：<http://127.0.0.1:8010/api/v1/health>
@@ -108,6 +111,7 @@ pytest -q
 
 | 文件 | 内容 |
 |------|------|
+| `server.json` | 开发启动：主机、端口、热重载 |
 | `cover_config.json` | 封面模板名、文档类型文字、字段占位、元数据规则 |
 | `layout_rules.json` | 表格字体、目录标题关键词、标题层级 |
 | `document_settings.json` | 纸张尺寸、页边距、单位换算 |

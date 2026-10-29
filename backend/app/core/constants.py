@@ -197,6 +197,13 @@ DEFAULT_VALIDATION_RULES: dict[str, Any] = {
     },
 }
 
+DEFAULT_SERVER: dict[str, Any] = {
+    "host": "127.0.0.1",
+    "port": 8010,
+    "reload": True,
+    "reload_dirs": ["app", "config"],
+}
+
 
 @lru_cache
 def cover_config() -> dict[str, Any]:
@@ -230,6 +237,13 @@ def document_settings() -> dict[str, Any]:
         DEFAULT_DOCUMENT_SETTINGS,
         _load_json(settings.config_dir / "document_settings.json"),
     )
+
+
+@lru_cache
+def server_config() -> dict[str, Any]:
+    """开发/启动参数（主机、端口、热重载）。"""
+    settings = get_settings()
+    return _merge(DEFAULT_SERVER, _load_json(settings.config_dir / "server.json"))
 
 
 @lru_cache

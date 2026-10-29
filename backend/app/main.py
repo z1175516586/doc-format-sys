@@ -2,7 +2,7 @@
 
 启动方式：
     cd backend
-    uvicorn app.main:app --reload --port 8000
+    python -m app
 """
 
 from __future__ import annotations

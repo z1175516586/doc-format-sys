@@ -1,0 +1,7 @@
+{
+  "host": "127.0.0.1",
+  "port": 8010,
+  "reload": true,
+  "reload_dirs": ["app", "config"],
+  "description": "开发启动参数。reload 为 true 时监视 reload_dirs，改 Python 或 JSON 会自动重启。不要监视 data/logs，上传文件会误触发重启。生产环境把 reload 设为 false"
+}
