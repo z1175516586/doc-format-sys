@@ -128,6 +128,9 @@ DEFAULT_COVER_CONFIG: dict[str, Any] = {
         "date": "2024年4月",
         "library_number": "10032357ARPD01AK008",
     },
+    "front_page": {
+        "issuer_names": ["鞍钢集团工程技术有限公司"],
+    },
     "metadata": {
         "merge_company_prefix": True,
         "company_suffix_pattern": "(公司|集团|厂|研究院|设计院|中心)$",
@@ -156,11 +159,13 @@ DEFAULT_COVER_CONFIG: dict[str, Any] = {
 DEFAULT_VALIDATION_RULES: dict[str, Any] = {
     "enabled": True,
     "max_issues": 20,
-    "cover_region": {
-        "type_line_max_chars": 20,
+    "front_page": {
+        "issuer_missing_severity": "error",
+        "type_invalid_severity": "error",
+        "project_missing_severity": "error",
+        "page_two_severity": "warning",
     },
     "document_type": {
-        "severity": "error",
         "mismatch_severity": "error",
         "stage_keywords": ["初步设计", "可行性研究", "可研", "初设", "代初步", "代可研", "代初设"],
         "allowed_suffixes": ["说明书", "报告"],
@@ -177,8 +182,12 @@ DEFAULT_VALIDATION_RULES: dict[str, Any] = {
         "jump_cross_chapter_severity": "warning",
     },
     "messages": {
-        "document_type_missing": "封面没有找到文档类型（初步设计 / 可行性研究 / 初步设计（代可研）/ 可行性研究（代初设）），请补齐后再上传。",
-        "document_type_unknown": "封面上的文档类型「{text}」不是规范写法，只能是：初步设计、可行性研究、初步设计（代可研）、可行性研究（代初设）。",
+        "cover_issuer_missing": "封面第一页没有找到单位名称「{issuer}」，无法定位文档类型和项目名称，请检查封面第一页。",
+        "front_type_missing": "封面第一页单位名称上方没有文字，这里应写文档类型：初步设计、可行性研究、初步设计（代可研）、可行性研究（代初设）。",
+        "front_type_invalid": "封面第一页单位名称上方应为文档类型，实际写的是「{text}」。文档类型只能是：初步设计、可行性研究、初步设计（代可研）、可行性研究（代初设）。",
+        "front_project_missing": "封面第一页文档类型「{text}」上方没有项目名称，请补齐后再上传。",
+        "page_two_type_mismatch": "封面第二页的文档类型「{page_two}」与第一页「{page_one}」不一致，已以第一页为准同步第二页。",
+        "page_two_type_invalid": "封面第二页的文档类型「{page_two}」不是规范写法，已以第一页「{page_one}」为准同步第二页。",
         "document_type_mismatch": "封面上的文档类型是「{detected}」，与选择的「{selected}」不一致，请选择与封面一致的文档类型。",
         "heading_number_invalid": "标题「{text}」的编号不规范：编号只能由数字和点组成，必须以数字开头和结尾，数字与点必须交替出现，并与标题之间留一个空格。",
         "heading_number_glued": "标题「{text}」的编号与标题之间缺少空格，规范写法应为「{number} 标题」。",

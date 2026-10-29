@@ -10,6 +10,10 @@
   },
   "stage_primary_variants": ["初步设计", "可行性研究"],
   "stage_secondary_variants": ["（代可研）", "（代初设）"],
+  "front_page": {
+    "issuer_names": ["鞍钢集团工程技术有限公司"],
+    "description": "封面第一页以单位名称定位：单位名上方最近一行是文档类型，再往上是项目名称。第一页止于第一个分页符或分节符"
+  },
   "field_placeholders": {
     "project_name": "高性能、安全、环保的磷酸亚铁锂电池材料项目",
     "date": "2024年4月",

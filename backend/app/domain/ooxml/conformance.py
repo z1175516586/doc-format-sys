@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from app.core.constants import cover_config, validation_rules
-from app.domain.ooxml.cover import CoverMetadataExtractor, _compact
+from app.domain.ooxml.cover import CoverMetadataExtractor
 from app.domain.ooxml.headings import HeadingReport
 from app.domain.ooxml.package import DocxPackage
 
@@ -42,105 +42,95 @@ class DocumentValidator:
         self.rules = validation_rules()
         self.heading_rules = self.rules["heading"]
         self.type_rules = self.rules["document_type"]
+        self.front_rules = self.rules["front_page"]
         self.messages = self.rules["messages"]
         self.max_issues = int(self.rules.get("max_issues", 20))
         self.max_excerpt = int(self.heading_rules.get("max_excerpt_chars", 40))
 
-        types = cover_config()["document_types"]
-        self._primary = {item["primary"] for item in types.values()}
-        self._secondary = {item.get("secondary", "") for item in types.values()}
-        self._canonical = {
-            _compact(item["primary"] + item.get("secondary", "")): tid
-            for tid, item in types.items()
-        }
+        config = cover_config()
+        self._issuers = "、".join(config["front_page"]["issuer_names"])
         self._labels = {
-            tid: item["primary"] + item.get("secondary", "") for tid, item in types.items()
+            tid: item["primary"] + item.get("secondary", "")
+            for tid, item in config["document_types"].items()
         }
 
     # ------------------------------------------------------------------
     # 封面文档类型
     # ------------------------------------------------------------------
     def check_document_type(self, selected_type: str) -> list[ValidationIssue]:
-        """封面类型必须是四种规范写法之一，且与用户选择一致。"""
-        region = self.rules.get("cover_region", {})
-        max_chars = int(region.get("type_line_max_chars", 20))
-        texts = CoverMetadataExtractor(self.pkg).cover_paragraph_texts()
-        keywords = tuple(self.type_rules.get("stage_keywords", ()))
+        """以封面第一页的单位名定位文档类型和项目名，类型还要与用户选择一致。
 
-        issues: list[ValidationIssue] = []
-        primary = ""
-        secondary = ""
-        unknown: list[str] = []
+        第二页类型不一致只提示：输出封面按模板重建，两页都以第一页为准。
+        """
+        layout = CoverMetadataExtractor(self.pkg).locate_front_page()
+        front = "封面第一页"
 
-        for text in texts:
-            compact = self._compact_stage(_compact(text))
-            if not compact or len(compact) > max_chars:
-                continue
-            if compact in self._canonical:
-                found_primary, found_secondary = self._split_combined(compact)
-                primary = primary or found_primary
-                secondary = secondary or found_secondary
-                if found_secondary:
-                    break
-                continue
-            if compact in self._primary:
-                primary = primary or compact
-                continue
-            if compact in self._secondary:
-                secondary = secondary or compact
-                continue
-            if not primary and keywords and compact.startswith(keywords):
-                unknown.append(compact)
-
-        if not primary:
-            # 一个规范写法都没找到：优先报「写了什么但不规范」，否则报「缺类型」
-            if unknown:
-                issues.extend(
-                    self._issue(
-                        self.type_rules.get("severity", "error"),
-                        "document_type_unknown",
-                        self.messages["document_type_unknown"].format(text=text),
-                        location="封面",
-                        excerpt=text,
-                    )
-                    for text in unknown
-                )
-            else:
-                issues.append(
-                    self._issue(
-                        self.type_rules.get("severity", "error"),
-                        "document_type_missing",
-                        self.messages["document_type_missing"],
-                        location="封面",
-                    )
-                )
-            return self._finish(issues)
-
-        detected_id = self._canonical.get(primary + secondary)
-        if detected_id is None:
-            # 主类型规范但组合不存在（如「初步设计（代初设）」）
-            issues.append(
+        if not layout.issuer_found:
+            return self._finish([
                 self._issue(
-                    self.type_rules.get("severity", "error"),
-                    "document_type_unknown",
-                    self.messages["document_type_unknown"].format(text=primary + secondary),
-                    location="封面",
-                    excerpt=primary + secondary,
+                    self.front_rules.get("issuer_missing_severity", "error"),
+                    "cover_issuer_missing",
+                    self.messages["cover_issuer_missing"].format(issuer=self._issuers),
+                    location=front,
                 )
-            )
-            return self._finish(issues)
+            ])
+        if not layout.type_text:
+            return self._finish([
+                self._issue(
+                    self.front_rules.get("type_invalid_severity", "error"),
+                    "front_type_missing",
+                    self.messages["front_type_missing"],
+                    location=front,
+                )
+            ])
+        if layout.type_id is None:
+            return self._finish([
+                self._issue(
+                    self.front_rules.get("type_invalid_severity", "error"),
+                    "front_type_invalid",
+                    self.messages["front_type_invalid"].format(text=self._clip(layout.type_text)),
+                    location=front,
+                    excerpt=self._clip(layout.type_text),
+                )
+            ])
+        if not layout.title_lines:
+            return self._finish([
+                self._issue(
+                    self.front_rules.get("project_missing_severity", "error"),
+                    "front_project_missing",
+                    self.messages["front_project_missing"].format(text=layout.type_text),
+                    location=front,
+                    excerpt=layout.type_text,
+                )
+            ])
 
-        if str(selected_type) != detected_id:
+        page_one = self._labels[layout.type_id]
+        issues: list[ValidationIssue] = []
+        if str(selected_type) != layout.type_id:
             issues.append(
                 self._issue(
                     self.type_rules.get("mismatch_severity", "error"),
                     "document_type_mismatch",
                     self.messages["document_type_mismatch"].format(
-                        detected=primary + secondary,
+                        detected=page_one,
                         selected=self._labels.get(str(selected_type), selected_type),
                     ),
-                    location="封面",
-                    excerpt=primary + secondary,
+                    location=front,
+                    excerpt=layout.type_text,
+                )
+            )
+
+        if layout.page_two_text and layout.page_two_id != layout.type_id:
+            code = "page_two_type_mismatch" if layout.page_two_id else "page_two_type_invalid"
+            issues.append(
+                self._issue(
+                    self.front_rules.get("page_two_severity", "warning"),
+                    code,
+                    self.messages[code].format(
+                        page_two=self._clip(layout.page_two_text), page_one=page_one
+                    ),
+                    location="封面第二页",
+                    excerpt=self._clip(layout.page_two_text),
                 )
             )
         return self._finish(issues)
@@ -234,20 +224,6 @@ class DocumentValidator:
 
     def _clip(self, text: str) -> str:
         return text if len(text) <= self.max_excerpt else text[: self.max_excerpt] + "…"
-
-    def _compact_stage(self, compact: str) -> str:
-        """去掉「说明书」「报告」这类后缀，再与规范类型比对。"""
-        for suffix in self.type_rules.get("allowed_suffixes", ()):
-            if len(compact) > len(suffix) and compact.endswith(suffix):
-                return compact[: -len(suffix)]
-        return compact
-
-    def _split_combined(self, compact: str) -> tuple[str, str]:
-        for primary in self._primary:
-            if compact.startswith(primary):
-                rest = compact[len(primary) :]
-                return primary, rest if rest in self._secondary else ""
-        return compact, ""
 
     @staticmethod
     def _same_chapter(prev_number: str, curr_number: str) -> bool:

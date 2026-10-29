@@ -24,7 +24,7 @@ from typing import Iterator
 
 from lxml import etree
 
-from app.core.constants import cover_config, pt_to_half_points
+from app.core.constants import cover_config, pt_to_half_points, validation_rules
 from app.core.logging import get_logger
 from app.core.namespaces import qn, w_attr
 from app.domain.ooxml.document import RelationshipRemapper, rewrite_relationship_ids
@@ -51,6 +51,28 @@ class CoverMetadata:
     @property
     def is_empty(self) -> bool:
         return not (self.project_name or self.date_text or self.library_number or self.personnel)
+
+
+@dataclass
+class FrontPageLayout:
+    """封面第一页的定位结果：单位名 → 上方文档类型 → 再上方项目名。
+
+    type_id 为 None 表示单位名上方那一行不是四种规范类型之一。
+    page_two_* 是第一页单位名之后出现的第一个文档类型，用来提示两页不一致。
+    """
+
+    issuer_found: bool = False
+    type_text: str = ""
+    type_id: str | None = None
+    title_lines: list[str] = field(default_factory=list)
+    page_two_text: str = ""
+    page_two_id: str | None = None
+
+
+@dataclass
+class _CoverLine:
+    text: str
+    page_end: bool = False
 
 
 def _compact(text: str) -> str:
@@ -109,6 +131,16 @@ class CoverMetadataExtractor:
         self.role_keywords = tuple(rules["personnel_role_keywords"])
         self.skip_keywords = tuple(rules["design_filter_keywords"])
         self.merge_company_prefix = bool(rules["merge_company_prefix"])
+        self.issuer_names = tuple(
+            _compact(name) for name in config["front_page"]["issuer_names"] if name
+        )
+        type_rules = validation_rules()["document_type"]
+        self.type_suffixes = tuple(type_rules.get("allowed_suffixes", ()))
+        self.stage_keywords = tuple(type_rules.get("stage_keywords", ()))
+        self._type_ids = {
+            _compact(item["primary"] + item.get("secondary", "")): type_id
+            for type_id, item in config["document_types"].items()
+        }
 
     # ------------------------------------------------------------------
     def extract(self) -> CoverMetadata:
@@ -133,16 +165,155 @@ class CoverMetadataExtractor:
                 meta.personnel.append(self._split_personnel(text))
                 continue
 
-        project, company = self._locate_title(texts)
+        layout = self.locate_front_page()
+        if layout.type_id is not None and layout.title_lines:
+            project, company = self._split_title(layout.title_lines)
+        else:
+            project, company = self._locate_title(texts)
         if project:
             meta.project_name = self._join_company(project, company)
 
         return meta
 
     # ------------------------------------------------------------------
-    def cover_paragraph_texts(self) -> list[str]:
-        """公开封面区段落文本（校验器复用，避免重复实现定位逻辑）。"""
-        return self._cover_paragraph_texts()
+    # 封面第一页定位（校验与取项目名共用）
+    # ------------------------------------------------------------------
+    def locate_front_page(self) -> FrontPageLayout:
+        """单位名 → 上方最近一行是文档类型 → 再往上是项目名称。
+
+        第一页止于第一个分页符或分节符；没有分页符时取到设计人员名单为止，
+        单位名只认第一次出现的那个。
+        """
+        layout = FrontPageLayout()
+        lines = self._cover_lines()
+        page_one = self._page_one(lines)
+
+        issuer_index = next(
+            (index for index, line in enumerate(page_one) if self._is_issuer(line.text)),
+            None,
+        )
+        if issuer_index is None:
+            return layout
+        layout.issuer_found = True
+
+        type_index = self._previous_text_index(page_one, issuer_index)
+        if type_index is None:
+            return layout
+        type_text = page_one[type_index].text.strip()
+        type_id = self.classify_stage(type_text)
+        if type_id is None and self._is_secondary_only(type_text):
+            primary_index = self._previous_text_index(page_one, type_index)
+            if primary_index is not None:
+                combined = page_one[primary_index].text.strip() + type_text
+                if self.classify_stage(combined) is not None:
+                    type_index = primary_index
+                    type_text = combined
+                    type_id = self.classify_stage(combined)
+        layout.type_text = type_text
+        layout.type_id = type_id
+        if type_id is None:
+            return layout
+
+        layout.title_lines = self._title_above(page_one, type_index)
+        layout.page_two_text, layout.page_two_id = self._page_two_stage(
+            lines[issuer_index + 1 :]
+        )
+        return layout
+
+    def classify_stage(self, text: str) -> str | None:
+        """文档类型的规范编号（1-4）。允许带「说明书」「报告」后缀和字间空格。"""
+        compact = self._stage_compact(text)
+        for suffix in self.type_suffixes:
+            if len(compact) > len(suffix) and compact.endswith(suffix):
+                compact = compact[: -len(suffix)]
+                break
+        return self._type_ids.get(compact)
+
+    def _stage_compact(self, text: str) -> str:
+        """去空白、去坐标残留数字，括号统一成全角。"""
+        compact = _compact(text).replace("(", "（").replace(")", "）")
+        return re.sub(r"[\d\-–—.．]+", "", compact)
+
+    def _is_secondary_only(self, text: str) -> bool:
+        compact = self._stage_compact(text)
+        return compact in {_compact(item) for item in self.stage_secondary}
+
+    def _is_issuer(self, text: str) -> bool:
+        """整行就是单位名（允许字间空格和坐标残留）。"""
+        compact = _compact(text)
+        for name in self.issuer_names:
+            if name and name in compact:
+                rest = compact.replace(name, "", 1)
+                if not rest or _POSITION_NOISE.fullmatch(rest):
+                    return True
+        return False
+
+    def _cover_lines(self) -> list[_CoverLine]:
+        """设计人员名单之前的段落，标出第一页在哪一段结束。"""
+        lines: list[_CoverLine] = []
+        for element in self.pkg.body:
+            if element.tag == qn("w:p"):
+                text = paragraph_text(element)
+                if self.marker in _compact(text):
+                    return lines
+                lines.append(_CoverLine(text=text, page_end=_ends_page(element)))
+            elif element.tag == qn("w:tbl"):
+                for paragraph in element.iter(qn("w:p")):
+                    lines.append(_CoverLine(text=paragraph_text(paragraph)))
+        return lines
+
+    @staticmethod
+    def _page_one(lines: list[_CoverLine]) -> list[_CoverLine]:
+        """显式分页符或分节符之前算第一页。段前分页属性不算，封面常把它挂在标题上。"""
+        for index, line in enumerate(lines):
+            if line.page_end and any(item.text.strip() for item in lines[: index + 1]):
+                return lines[: index + 1]
+        return lines
+
+    @staticmethod
+    def _previous_text_index(lines: list[_CoverLine], start: int) -> int | None:
+        """start 上方最近一个有文字的段落。纯坐标残留不算文字。"""
+        for index in range(start - 1, -1, -1):
+            compact = _compact(lines[index].text)
+            if compact and not _POSITION_NOISE.fullmatch(compact):
+                return index
+        return None
+
+    def _title_above(self, lines: list[_CoverLine], type_index: int) -> list[str]:
+        """文档类型上方的项目名称。碰到单位名、日期、库号或另一个类型就停，避免拼到上一页。"""
+        collected: list[str] = []
+        for index in range(type_index - 1, -1, -1):
+            stripped = lines[index].text.strip()
+            compact = _compact(stripped)
+            if not compact:
+                continue
+            if (
+                self._is_issuer(stripped)
+                or self._pick_date(compact)
+                or self.library_pattern.search(compact)
+                or "库号" in compact
+                or self.classify_stage(stripped) is not None
+            ):
+                break
+            if self._is_title_noise(stripped):
+                continue
+            collected.append(stripped)
+        collected.reverse()
+        return collected
+
+    def _page_two_stage(self, lines: list[_CoverLine]) -> tuple[str, str | None]:
+        """第一页单位名之后第一个像文档类型的段落（规范或不规范都返回）。"""
+        for line in lines:
+            stripped = line.text.strip()
+            if not stripped:
+                continue
+            type_id = self.classify_stage(stripped)
+            if type_id is not None:
+                return stripped, type_id
+            compact = self._stage_compact(stripped)
+            if len(compact) <= 12 and any(keyword in compact for keyword in self.stage_keywords):
+                return stripped, None
+        return "", None
 
     def _cover_paragraph_texts(self) -> list[str]:
         """取标记段落之前的所有非空段落文本（含表格内段落）。"""
@@ -202,17 +373,20 @@ class CoverMetadataExtractor:
         anchor = self._stage_anchor_index(texts)
         if anchor is None:
             return self._fallback_title(texts), ""
+        return self._split_title(self._title_candidates(texts[:anchor]))
 
+    def _split_title(self, lines: list[str]) -> tuple[str, str]:
+        """以「公司」「集团」等结尾的一行作单位名，其余按顺序拼成项目名。"""
         company = ""
         parts: list[str] = []
-        for text in self._title_candidates(texts[:anchor]):
+        for text in lines:
             stripped = text.strip()
-            if self.company_suffix.search(_compact(stripped)):
-                if not company:
-                    company = stripped
+            if self.company_suffix.search(_compact(stripped)) and not company:
+                company = stripped
                 continue
             parts.append(stripped)
-
+        if not parts and company:
+            return company, ""
         return "".join(parts), company
 
     def _stage_anchor_index(self, texts: list[str]) -> int | None:
@@ -604,6 +778,15 @@ def _font_run(text: str, east_asia: str, ascii_font: str, size: str, *, bold: bo
     text_node.set(qn("xml:space"), "preserve")
     text_node.text = text
     return run
+
+
+def _ends_page(paragraph: etree._Element) -> bool:
+    """段落里有分页符，或段落带分节符。"""
+    if paragraph.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:
+        return True
+    return any(
+        (br.get(w_attr("type")) or "") == "page" for br in paragraph.iter(qn("w:br"))
+    )
 
 
 def _paragraph_has_logo(paragraph: etree._Element) -> bool:
