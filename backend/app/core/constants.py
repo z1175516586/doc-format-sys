@@ -197,6 +197,23 @@ DEFAULT_VALIDATION_RULES: dict[str, Any] = {
     },
 }
 
+DEFAULT_LINEAGE: dict[str, Any] = {
+    "part_name": "customXml/dfsLineage.xml",
+    "props_name": "customXml/dfsLineageProps.xml",
+    "rels_name": "customXml/_rels/dfsLineage.xml.rels",
+    "namespace": "https://doc-format-sys/ns/lineage",
+    "datastore_ns": "http://schemas.openxmlformats.org/officeDocument/2006/customXml",
+    "item_guid": "{c0a1e5d0-7b3f-4a91-9d2e-1f6b8c4a5e70}",
+    "content_type": "application/xml",
+    "props_content_type": "application/vnd.openxmlformats-officedocument.customXmlProperties+xml",
+    "files_subdir": "files",
+    "nodes_filename": "nodes.jsonl",
+    "records_filename": "records.jsonl",
+    "modified_message": "这份文档的身份与系统中的记录一致，但内容和保存的版本不一样，文档曾被修改过。转换树仍按原身份展示。",
+    "missing_file_message": "有记录、文件已删",
+}
+
+
 DEFAULT_SERVER: dict[str, Any] = {
     "host": "127.0.0.1",
     "port": 8010,
@@ -237,6 +254,13 @@ def document_settings() -> dict[str, Any]:
         DEFAULT_DOCUMENT_SETTINGS,
         _load_json(settings.config_dir / "document_settings.json"),
     )
+
+
+@lru_cache
+def lineage_config() -> dict[str, Any]:
+    """文档身份与转换树配置。"""
+    settings = get_settings()
+    return _merge(DEFAULT_LINEAGE, _load_json(settings.config_dir / "lineage.json"))
 
 
 @lru_cache

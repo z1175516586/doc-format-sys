@@ -12,6 +12,7 @@ import {
   Select,
   Space,
   Tag,
+  Tree,
   Typography,
   Upload,
   message,
@@ -22,6 +23,7 @@ import {
   CircleCheck,
   Download,
   FileText,
+  GitBranch,
   History,
   Info,
   Play,
@@ -29,26 +31,50 @@ import {
 
 import {
   fetchEngine,
-  fetchHistoryByHash,
   fetchTask,
   fetchTemplates,
-  sha256OfFile,
+  inspectLineage,
   submitConvert,
   subscribeTask,
 } from "./api/client";
 import { AppIcon } from "./components/AppIcon";
-import { ACCEPTED_EXTENSIONS, API, APP_TITLE, DOCUMENT_TYPES, NOTICES, STEP_LABELS, TOC_TITLE } from "./constants/app";
-import type { EngineInfo, HistoryRecord, TemplateInfo, ValidationIssue } from "./types";
+import { ACCEPTED_EXTENSIONS, API, APP_TITLE, DOCUMENT_TYPES, LINEAGE, NOTICES, STEP_LABELS, TOC_TITLE } from "./constants/app";
+import type { EngineInfo, LineageInspect, LineageNode, TemplateInfo, ValidationIssue } from "./types";
+import type { DataNode } from "antd/es/tree";
 
 const { Header, Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
 
-function formatTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString("zh-CN", { hour12: false });
+function lineageKey(node: LineageNode): string {
+  return node.node_id || node.record_id || node.name;
+}
+
+function lineageTreeData(node: LineageNode): DataNode {
+  const failed = node.kind === "failed";
+  const title = (
+    <Space size={4} wrap>
+      <AppIcon icon={failed ? CircleAlert : FileText} size={14} />
+      <Text strong={node.current} type={failed ? "danger" : undefined}>
+        {failed ? `${LINEAGE.failed}${node.message ? `：${node.message}` : ""}` : node.name}
+      </Text>
+      {node.current ? <Tag color="blue">当前</Tag> : null}
+      {failed ? <Tag color="error">失败</Tag> : null}
+      {node.file_available && node.download_url ? (
+        <a href={node.download_url} onClick={(event) => event.stopPropagation()}>
+          <Space size={2}>
+            <AppIcon icon={Download} size={12} />
+            下载
+          </Space>
+        </a>
+      ) : null}
+      {!failed && !node.file_available ? <Text type="secondary">{node.missing_file_message || LINEAGE.missingFile}</Text> : null}
+    </Space>
+  );
+  return {
+    key: lineageKey(node),
+    title,
+    children: node.children.map(lineageTreeData),
+  };
 }
 
 export default function App() {
@@ -58,7 +84,7 @@ export default function App() {
   const [templateId, setTemplateId] = useState<string | undefined>();
   const [file, setFile] = useState<File | null>(null);
   const [fileList, setFileList] = useState<UploadFile[]>([]);
-  const [history, setHistory] = useState<HistoryRecord[] | null>(null);
+  const [lineage, setLineage] = useState<LineageInspect | null>(null);
   const [historyError, setHistoryError] = useState("");
   const [running, setRunning] = useState(false);
   const [percent, setPercent] = useState(0);
@@ -79,14 +105,12 @@ export default function App() {
   );
 
   async function loadHistory(next: File) {
-    setHistory(null);
+    setLineage(null);
     setHistoryError("");
     try {
-      const hash = await sha256OfFile(next);
-      const items = await fetchHistoryByHash(hash);
-      setHistory([...items].reverse());
+      setLineage(await inspectLineage(next));
     } catch (error) {
-      setHistoryError(error instanceof Error ? error.message : "查询历史失败");
+      setHistoryError(error instanceof Error ? error.message : "查询转换树失败");
     }
   }
 
@@ -240,7 +264,8 @@ export default function App() {
                 onRemove={() => {
                   setFile(null);
                   setFileList([]);
-                  setHistory(null);
+                  setLineage(null);
+                  setHistoryError("");
                   resetResult();
                 }}
               >
@@ -332,44 +357,55 @@ export default function App() {
               title={
                 <Space>
                   <AppIcon icon={History} />
-                  转换历史
+                  转换树
                 </Space>
               }
               styles={{ body: { maxHeight: 640, overflow: "auto" } }}
             >
-              {!file ? <Empty description="请上传文件以查看历史记录" /> : null}
+              {!file ? <Empty description={LINEAGE.empty} /> : null}
               {historyError ? <Alert type="error" showIcon message={historyError} /> : null}
-              {file && history && history.length === 0 ? (
-                <Empty description="该文件是首次上传，无转换历史" />
-              ) : null}
-              {history && history.length > 0 ? (
-                <List
-                  header={<Text>总转换次数：{history.length}</Text>}
-                  dataSource={history}
-                  renderItem={(record, index) => (
-                    <List.Item>
-                      <Space direction="vertical" size={2}>
-                        <Text strong>第 {history.length - index} 次转换</Text>
-                        <Text>
-                          状态：
-                          <Tag color={record.success ? "success" : "error"}>{record.success ? "成功" : "失败"}</Tag>
-                        </Text>
-                        <Text type="secondary">{formatTime(record.created_at)}</Text>
-                        <Text>说明：{record.message || "无"}</Text>
-                        {record.success && record.output_name ? (
-                          <a href={API.historyFile(record.record_id)}>
-                            <Space size={4}>
-                              <AppIcon icon={Download} size={14} />
-                              {record.output_name}
-                            </Space>
-                          </a>
-                        ) : (
-                          <Text type="secondary">下载文件：无</Text>
-                        )}
-                      </Space>
-                    </List.Item>
-                  )}
+              {file && lineage?.new_document ? <Empty description={LINEAGE.firstUpload} /> : null}
+              {lineage?.modified ? (
+                <Alert
+                  style={{ marginBottom: 12 }}
+                  type="warning"
+                  showIcon
+                  icon={<AppIcon icon={CircleAlert} />}
+                  message={LINEAGE.modifiedTitle}
+                  description={lineage.modified_message}
                 />
+              ) : null}
+              {lineage?.path && lineage.path.length > 0 ? (
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  <div>
+                    <Text type="secondary">{LINEAGE.pathTitle}</Text>
+                    <div>
+                      {lineage.path.map((item, index) => (
+                        <span key={lineageKey(item)}>
+                          {index > 0 ? " → " : null}
+                          <Text strong={item.current}>{item.name}</Text>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  {lineage.tree ? (
+                    <div>
+                      <Space size={4} style={{ marginBottom: 8 }}>
+                        <AppIcon icon={GitBranch} size={14} />
+                        <Text type="secondary">{LINEAGE.treeTitle}</Text>
+                      </Space>
+                      <Tree
+                        key={lineage.root_id || lineage.current_node_id || "tree"}
+                        showLine
+                        defaultExpandAll
+                        selectable={false}
+                        selectedKeys={lineage.current_node_id ? [lineage.current_node_id] : []}
+                        treeData={[lineageTreeData(lineage.tree)]}
+                        titleRender={(item) => item.title}
+                      />
+                    </div>
+                  ) : null}
+                </Space>
               ) : null}
             </Card>
           </Col>

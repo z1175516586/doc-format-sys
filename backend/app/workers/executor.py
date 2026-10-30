@@ -78,9 +78,10 @@ class TaskExecutor:
 
         self.history.record_format_result(
             task_id=task_id,
-            source_name=Path(request.source_path).name,
+            source_name=request.source_name or Path(request.source_path).name,
             source_hash=source_hash,
             result=result,
+            parent_id=request.source_node_id,
         )
 
         if result.success and output_path is not None:
@@ -105,18 +106,29 @@ class TaskExecutor:
                 text = str(item.get("message") or "")
                 if text:
                     warnings.append(text)
-            self.history.record(
-                task_id=task_id,
-                source_name=Path(request.source_path).name,
-                source_hash=source_hash,
-                output_name=None,
-                output_path=None,
-                success=False,
-                message=message,
-                engine="unknown",
-                duration_ms=0,
-                warnings=warnings,
-            )
+            source_name = request.source_name or Path(request.source_path).name
+            if request.source_node_id:
+                self.history.register_failure(
+                    parent_id=request.source_node_id,
+                    task_id=task_id,
+                    source_name=source_name,
+                    source_hash=source_hash,
+                    message=message,
+                    warnings=warnings,
+                )
+            else:
+                self.history.record(
+                    task_id=task_id,
+                    source_name=source_name,
+                    source_hash=source_hash,
+                    output_name=None,
+                    output_path=None,
+                    success=False,
+                    message=message,
+                    engine="unknown",
+                    duration_ms=0,
+                    warnings=warnings,
+                )
         except Exception:
             logger.exception("写历史失败")
 

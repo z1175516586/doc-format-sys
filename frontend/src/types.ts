@@ -24,6 +24,32 @@ export interface HistoryRecord {
   warnings: string[];
 }
 
+export interface LineageNode {
+  kind: "document" | "failed";
+  node_id: string | null;
+  record_id: string | null;
+  name: string;
+  created_at: string;
+  success: boolean;
+  message: string;
+  current: boolean;
+  file_available: boolean;
+  download_url: string | null;
+  missing_file_message: string;
+  children: LineageNode[];
+}
+
+export interface LineageInspect {
+  new_document: boolean;
+  modified: boolean;
+  modified_message: string;
+  current_node_id: string | null;
+  root_id: string | null;
+  path: LineageNode[];
+  tree: LineageNode | null;
+  file_name: string;
+}
+
 export interface ProgressEvent {
   seq: number;
   type: "progress" | "log" | "done" | "error";

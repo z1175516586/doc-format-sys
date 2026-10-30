@@ -21,6 +21,7 @@ XML = "http://www.w3.org/XML/1998/namespace"
 # OPC 包结构命名空间（.rels / [Content_Types].xml），注意它们的元素没有前缀
 PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 PKG_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+DS = "http://schemas.openxmlformats.org/officeDocument/2006/customXml"
 
 # ---- lxml 查询用前缀映射 ----
 NSMAP: dict[str, str] = {
@@ -37,6 +38,7 @@ NSMAP: dict[str, str] = {
     "xml": XML,
     "pr": PKG_REL,
     "ct": PKG_CT,
+    "ds": DS,
 }
 
 # ---- 包内部件路径 ----

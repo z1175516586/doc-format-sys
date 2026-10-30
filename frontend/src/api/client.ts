@@ -1,5 +1,5 @@
 import { API } from "../constants/app";
-import type { EngineInfo, HistoryRecord, ProgressEvent, TaskDetail, TemplateInfo } from "../types";
+import type { EngineInfo, HistoryRecord, LineageInspect, ProgressEvent, TaskDetail, TemplateInfo } from "../types";
 
 export class ApiError extends Error {
   constructor(message: string) {
@@ -42,9 +42,14 @@ export async function fetchHistoryByHash(hash: string): Promise<HistoryRecord[]>
   return body.items;
 }
 
-export async function sha256OfFile(file: File): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+export async function inspectLineage(file: File): Promise<LineageInspect> {
+  const form = new FormData();
+  form.append("file", file);
+  const response = await fetch(API.historyInspect, { method: "POST", body: form });
+  if (!response.ok) {
+    throw new ApiError(await readError(response));
+  }
+  return response.json() as Promise<LineageInspect>;
 }
 
 export async function submitConvert(form: FormData): Promise<{ taskId: string }> {

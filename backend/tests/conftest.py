@@ -35,6 +35,7 @@ def sample_docx(tmp_path: Path) -> Path:
     # ---- 封面 ----
     doc.add_paragraph("某某工程项目")
     doc.add_paragraph("初步设计说明书")
+    doc.add_paragraph("鞍钢集团工程技术有限公司")
 
     cover_table = doc.add_table(rows=3, cols=2)
     cover_table.style = "Table Grid"

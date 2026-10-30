@@ -47,12 +47,24 @@ export const STEP_LABELS: Record<string, string> = {
   validate: "结构校验",
 };
 
+export const LINEAGE = {
+  empty: "请上传文件以查看转换树",
+  firstUpload: "该文件是首次进入本系统，还没有转换树",
+  modifiedTitle: "文档内容已改动",
+  missingFile: "有记录、文件已删",
+  failed: "转换失败",
+  pathTitle: "来时的路",
+  treeTitle: "转换树",
+} as const;
+
 export const API = {
   convert: "/api/v1/documents/convert",
   engines: "/api/v1/engines",
   templates: "/api/v1/templates",
+  historyInspect: "/api/v1/history/inspect",
   historyByHash: (hash: string) => `/api/v1/history/by-hash/${hash}`,
   historyFile: (recordId: string) => `/api/v1/history/${recordId}/file`,
+  historyNodeFile: (nodeId: string) => `/api/v1/history/nodes/${nodeId}/file`,
   taskEvents: (taskId: string) => `/api/v1/tasks/${taskId}/events`,
   task: (taskId: string) => `/api/v1/tasks/${taskId}`,
   taskDownload: (taskId: string) => `/api/v1/tasks/${taskId}/download`,

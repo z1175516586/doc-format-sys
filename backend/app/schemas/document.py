@@ -31,6 +31,8 @@ class FormatRequest(BaseModel):
     source_path: str
     output_path: str
     template_path: str | None = None
+    source_name: str = ""
+    source_node_id: str | None = None
     options: ConvertOptions = Field(default_factory=ConvertOptions)
 
 

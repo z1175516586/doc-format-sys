@@ -76,8 +76,18 @@ async def _prepare_request(
         source_path=str(source_path),
         output_path=str(output_path),
         template_path=str(template_path) if template_path else None,
+        source_name=file.filename or source_path.name,
         options=options,
     )
+
+
+def _attach_source_node(request: FormatRequest) -> FormatRequest:
+    """转换前把源文档挂到转换树上。"""
+    history = get_history_service()
+    source_path = Path(request.source_path)
+    ensured = history.ensure_source(source_path, request.source_name or source_path.name)
+    request.source_node_id = ensured["node"]["node_id"]
+    return request
 
 
 @router.post("/convert", summary="提交文档排版任务（异步）")
@@ -111,6 +121,7 @@ async def convert_async(
         apply_template,
     )
     request = await _prepare_request(file, template_file, template_id, options)
+    request = _attach_source_node(request)
 
     history = get_history_service()
     source_hash = history.file_hash(Path(request.source_path))
@@ -162,6 +173,7 @@ async def convert_sync(
         apply_template,
     )
     request = await _prepare_request(file, template_file, template_id, options)
+    request = _attach_source_node(request)
 
     history = get_history_service()
     source_hash = history.file_hash(Path(request.source_path))
@@ -171,9 +183,10 @@ async def convert_sync(
 
     history.record_format_result(
         task_id=uuid.uuid4().hex,
-        source_name=file.filename or Path(request.source_path).name,
+        source_name=request.source_name or file.filename or Path(request.source_path).name,
         source_hash=source_hash,
         result=result,
+        parent_id=request.source_node_id,
     )
 
     if not result.success or not result.output_path:
