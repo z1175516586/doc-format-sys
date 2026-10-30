@@ -23,7 +23,16 @@ from lxml import etree
 from app.core.constants import layout_rules
 from app.core.errors import LayoutError
 from app.core.logging import get_logger
-from app.core.namespaces import PART_CONTENT_TYPES, PART_DOCUMENT, PART_DOCUMENT_RELS, PART_STYLES, R, qn, w_attr
+from app.core.namespaces import (
+    PART_CONTENT_TYPES,
+    PART_DOCUMENT,
+    PART_DOCUMENT_RELS,
+    PART_SETTINGS,
+    PART_STYLES,
+    R,
+    qn,
+    w_attr,
+)
 from app.domain.ooxml.package import DocxPackage, paragraph_text
 from app.domain.ooxml.styles import StyleResolver
 from app.domain.ooxml.toc import is_generated_toc_line
@@ -469,6 +478,10 @@ class DocumentMerger:
         # 4. 只重写追加内容里的 r:id
         report.rewritten_references = rewrite_relationship_ids(appended_nodes, mapping)
 
+        # 只有原稿里有 VML 流程图文本框时，才沿用原稿字距。普通文档仍用封面模板的设置。
+        if _has_vml_textbox(source):
+            self._keep_source_text_layout(source)
+
         report.final_sections = len(self.base.section_properties())
         logger.info(
             "合并完成: 追加 %d 个元素, 迁移关系 %d 条, 节数 %d -> %d",
@@ -549,6 +562,30 @@ class DocumentMerger:
             logger.info("合并样式 %d 条", merged)
         return merged
 
+    def _keep_source_text_layout(self, source: DocxPackage) -> None:
+        """沿用正文的字距和兼容模式，避免文本框里的字被裁切。"""
+        if not self.base.has(PART_SETTINGS) or not source.has(PART_SETTINGS):
+            return
+
+        base_root = self.base.xml(PART_SETTINGS)
+        source_root = source.xml(PART_SETTINGS)
+        for tag in ("w:characterSpacingControl", "w:noPunctuationKerning"):
+            _sync_child(base_root, source_root, qn(tag))
+
+        source_compat = source_root.find(qn("w:compat"))
+        if source_compat is None:
+            return
+        base_compat = base_root.find(qn("w:compat"))
+        if base_compat is None:
+            base_compat = etree.SubElement(base_root, qn("w:compat"))
+        for tag in (
+            "w:doNotWrapTextWithPunct",
+            "w:doNotUseEastAsianBreakRules",
+            "w:balanceSingleByteDoubleByteWidth",
+        ):
+            _sync_child(base_compat, source_compat, qn(tag))
+        _sync_compat_mode(base_compat, source_compat)
+
     @staticmethod
     def _demote_trailing_section_properties(body: etree._Element) -> None:
         """把 body 末尾的 w:sectPr 包进 w:p/w:pPr，使其成为分节符。"""
@@ -560,6 +597,44 @@ class DocumentMerger:
         paragraph = etree.SubElement(body, qn("w:p"))
         ppr = etree.SubElement(paragraph, qn("w:pPr"))
         ppr.append(last)
+
+
+def _has_vml_textbox(pkg: DocxPackage) -> bool:
+    return any(node.tag == qn("v:textbox") for node in pkg.body.iter())
+
+
+def _sync_child(base_parent: etree._Element, source_parent: etree._Element, tag: str) -> None:
+    """按源文档有没有这个节点，增删或替换基础文档里的同名节点。"""
+    source_el = source_parent.find(tag)
+    base_el = base_parent.find(tag)
+    if source_el is None:
+        if base_el is not None:
+            base_parent.remove(base_el)
+        return
+    clone = deepcopy(source_el)
+    if base_el is None:
+        base_parent.append(clone)
+    else:
+        base_parent.replace(base_el, clone)
+
+
+def _sync_compat_mode(base_compat: etree._Element, source_compat: etree._Element) -> None:
+    source_mode = _compat_mode(source_compat)
+    if source_mode is None:
+        return
+    base_mode = _compat_mode(base_compat)
+    clone = deepcopy(source_mode)
+    if base_mode is None:
+        base_compat.append(clone)
+    else:
+        base_compat.replace(base_mode, clone)
+
+
+def _compat_mode(compat: etree._Element) -> etree._Element | None:
+    for element in compat.findall(qn("w:compatSetting")):
+        if element.get(w_attr("name")) == "compatibilityMode":
+            return element
+    return None
 
 
 def _style_display_name(style: etree._Element) -> str:

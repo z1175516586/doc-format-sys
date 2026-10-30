@@ -321,6 +321,10 @@ class DocumentFormatService:
         return HighlightProcessor(self._pkg(state)).remove_all()
 
     def _step_template(self, state: _PipelineState) -> dict[str, object]:
+        # 必须在导入模板样式之前。导入会把 Normal 换成模板的四号字，
+        # 文本框里的空行没有自己的字号，行高会跟着变高。
+        PictureProcessor(self._pkg(state)).preserve_diagram_textbox_source_style()
+
         if not state.options.apply_template:
             return {"skipped": True}
 
