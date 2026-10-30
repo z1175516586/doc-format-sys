@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import zipfile
+from copy import deepcopy
 
 from lxml import etree
 
@@ -403,17 +404,16 @@ def graft_refreshed_toc(base_path: Path, refreshed_path: Path) -> str:
     if base_media == 0 or refreshed_media >= base_media:
         return "refresh_kept"
 
-    with DocxPackage.open(refreshed_path) as refreshed:
+    with DocxPackage.open(refreshed_path) as refreshed, DocxPackage.open(base_path) as base:
         payloads = [etree.tostring(element) for element in _toc_result_elements(refreshed)]
-
-    if not payloads:
-        logger.warning("域刷新后图片减少，但没有可嫁接的目录块")
-        return "no_toc_result"
-
-    with DocxPackage.open(base_path) as base:
+        if not payloads:
+            logger.warning("域刷新后图片减少，但没有可嫁接的目录块")
+            return "no_toc_result"
         if not _replace_toc_anchor(base, payloads):
             logger.warning("域刷新后图片减少，原文档里没有 TOC 域可替换")
             return "no_anchor"
+        # 刷新结果里的 TOC3 等样式只存在于被丢弃的那份包。段落嫁接回来后要把样式定义一并带上。
+        _copy_missing_referenced_styles(base, refreshed, [etree.fromstring(payload) for payload in payloads])
         base.save(refreshed_path)
 
     logger.info(
@@ -494,6 +494,87 @@ def _replace_toc_anchor(pkg: DocxPackage, payloads: list[bytes]) -> bool:
         parent.insert(index + offset, element)
     parent.remove(anchor)
     return True
+
+
+_STYLE_REF_TAGS = (qn("w:pStyle"), qn("w:rStyle"), qn("w:tblStyle"))
+_STYLE_CHAIN_TAGS = (qn("w:basedOn"), qn("w:link"), qn("w:next"))
+_TOC_STYLE_ID = re.compile(r"TOC(\d+)")
+
+
+def _copy_missing_referenced_styles(
+    base: DocxPackage,
+    refreshed: DocxPackage,
+    roots: list[etree._Element],
+) -> int:
+    """把嫁接块引用到、但原文档没有的样式从刷新结果抄回来。
+
+    刷新结果整包会被丢掉，只留目录段落。LibreOffice 为三级标题新建的 TOC3
+    就在那份样式表里。不抄回来，成品会引用一个不存在的段落样式。
+    """
+    if not base.has(PART_STYLES):
+        return 0
+
+    base_root = base.xml(PART_STYLES)
+    base_ids = {
+        style.get(w_attr("styleId"))
+        for style in base_root.findall(qn("w:style"))
+        if style.get(w_attr("styleId"))
+    }
+    refreshed_by_id: dict[str, etree._Element] = {}
+    if refreshed.has(PART_STYLES):
+        refreshed_by_id = {
+            style_id: style
+            for style in refreshed.xml(PART_STYLES).findall(qn("w:style"))
+            if (style_id := style.get(w_attr("styleId")))
+        }
+
+    needed: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        for node in root.iter():
+            if node.tag not in _STYLE_REF_TAGS:
+                continue
+            style_id = node.get(w_attr("val")) or ""
+            if style_id and style_id not in seen:
+                seen.add(style_id)
+                needed.append(style_id)
+
+    index = 0
+    while index < len(needed):
+        style = refreshed_by_id.get(needed[index])
+        index += 1
+        if style is None:
+            continue
+        for tag in _STYLE_CHAIN_TAGS:
+            link = style.find(tag)
+            style_id = link.get(w_attr("val")) if link is not None else ""
+            if style_id and style_id not in seen:
+                seen.add(style_id)
+                needed.append(style_id)
+
+    copied = 0
+    for style_id in needed:
+        if style_id in base_ids:
+            continue
+        source = refreshed_by_id.get(style_id)
+        base_root.append(deepcopy(source) if source is not None else _minimal_paragraph_style(style_id))
+        base_ids.add(style_id)
+        copied += 1
+
+    if copied:
+        logger.info("嫁接目录时补入缺失样式 %d 条", copied)
+    return copied
+
+
+def _minimal_paragraph_style(style_id: str) -> etree._Element:
+    """刷新结果里也没有该样式时，补一条同 ID 的段落样式，避免引用悬空。"""
+    style = etree.Element(qn("w:style"))
+    style.set(w_attr("type"), "paragraph")
+    style.set(w_attr("styleId"), style_id)
+    name = etree.SubElement(style, qn("w:name"))
+    match = _TOC_STYLE_ID.fullmatch(style_id)
+    name.set(w_attr("val"), f"toc {match.group(1)}" if match else style_id)
+    return style
 
 
 def _ensure_ppr(style: etree._Element) -> etree._Element:

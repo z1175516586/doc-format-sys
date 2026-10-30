@@ -96,6 +96,90 @@ def test_cover_table_removal_requires_marker(tmp_path: Path) -> None:
         assert len(pkg.tables()) == 1
 
 
+def test_graft_copies_toc_style_missing_from_base(sample_docx: Path, tmp_path: Path) -> None:
+    from app.domain.ooxml.toc import graft_refreshed_toc
+
+    base = tmp_path / "before.docx"
+    refreshed = tmp_path / "after.docx"
+    with DocxPackage.open(sample_docx) as pkg:
+        pkg.add_part("word/media/image1.png", b"\x89PNG")
+        TocProcessor(pkg).insert_field()
+        styles = pkg.xml("word/styles.xml")
+        for style in list(styles.findall(qn("w:style"))):
+            if style.get(qn("w:styleId")) == "TOC3":
+                styles.remove(style)
+        pkg.save(base)
+
+    with DocxPackage.open(sample_docx) as pkg:
+        paragraph = etree.Element(qn("w:p"))
+        ppr = etree.SubElement(paragraph, qn("w:pPr"))
+        pstyle = etree.SubElement(ppr, qn("w:pStyle"))
+        pstyle.set(qn("w:val"), "TOC3")
+        run = etree.SubElement(paragraph, qn("w:r"))
+        instr = etree.SubElement(run, qn("w:instrText"))
+        instr.text = " PAGEREF _Toc1 \\h "
+        pkg.body.insert(0, paragraph)
+        styles = pkg.xml("word/styles.xml")
+        style = etree.SubElement(styles, qn("w:style"))
+        style.set(qn("w:type"), "paragraph")
+        style.set(qn("w:styleId"), "TOC3")
+        name = etree.SubElement(style, qn("w:name"))
+        name.set(qn("w:val"), "toc 3")
+        based = etree.SubElement(style, qn("w:basedOn"))
+        based.set(qn("w:val"), "Normal")
+        pkg.save(refreshed)
+
+    assert graft_refreshed_toc(base, refreshed) == "grafted"
+
+    with DocxPackage.open(refreshed) as pkg:
+        ids = {style.get(qn("w:styleId")) for style in pkg.xml("word/styles.xml").findall(qn("w:style"))}
+        assert "TOC3" in ids
+        assert any(node.get(qn("w:val")) == "TOC3" for node in pkg.body.iter(qn("w:pStyle")))
+        assert pkg.has("word/media/image1.png")
+
+
+def test_graft_creates_toc_style_when_refresh_omits_it(sample_docx: Path, tmp_path: Path) -> None:
+    from app.domain.ooxml.toc import graft_refreshed_toc
+
+    base = tmp_path / "before.docx"
+    refreshed = tmp_path / "after.docx"
+    with DocxPackage.open(sample_docx) as pkg:
+        pkg.add_part("word/media/image1.png", b"\x89PNG")
+        TocProcessor(pkg).insert_field()
+        styles = pkg.xml("word/styles.xml")
+        for style in list(styles.findall(qn("w:style"))):
+            if style.get(qn("w:styleId")) == "TOC3":
+                styles.remove(style)
+        pkg.save(base)
+    with DocxPackage.open(sample_docx) as pkg:
+        styles = pkg.xml("word/styles.xml")
+        for style in list(styles.findall(qn("w:style"))):
+            if style.get(qn("w:styleId")) == "TOC3":
+                styles.remove(style)
+        paragraph = etree.Element(qn("w:p"))
+        ppr = etree.SubElement(paragraph, qn("w:pPr"))
+        pstyle = etree.SubElement(ppr, qn("w:pStyle"))
+        pstyle.set(qn("w:val"), "TOC3")
+        run = etree.SubElement(paragraph, qn("w:r"))
+        instr = etree.SubElement(run, qn("w:instrText"))
+        instr.text = " PAGEREF _Toc1 \\h "
+        pkg.body.insert(0, paragraph)
+        pkg.save(refreshed)
+
+    assert graft_refreshed_toc(base, refreshed) == "grafted"
+
+    with DocxPackage.open(refreshed) as pkg:
+        styles = pkg.xml("word/styles.xml")
+        match = [
+            style
+            for style in styles.findall(qn("w:style"))
+            if style.get(qn("w:styleId")) == "TOC3"
+        ]
+        assert len(match) == 1
+        name = match[0].find(qn("w:name"))
+        assert name is not None and name.get(qn("w:val")) == "toc 3"
+
+
 def test_toc_insert_and_detect(sample_docx: Path) -> None:
     with DocxPackage.open(sample_docx) as pkg:
         processor = TocProcessor(pkg)
