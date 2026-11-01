@@ -57,6 +57,32 @@ export const LINEAGE = {
   treeTitle: "转换树",
 } as const;
 
+/**
+ * 目录页码由谁计算。二选一，是同一件事的两种实现，不能并存：
+ * - client：Word/WPS 打开时算，服务器不占引擎
+ * - server：服务器用 LibreOffice 预先算好并落盘，全局串行、需排队
+ */
+export const TOC_PAGE_SOURCE = {
+  title: "目录页码计算方式",
+  clientLabel: "打开文档时自动更新（推荐）",
+  clientHint: "Word / WPS 打开时自动算页码，服务器不占用排版引擎，适合多人同时提交",
+  serverLabel: "服务器端预刷新（LibreOffice）",
+  serverHint: "交付时页码就已写好；LibreOffice 全局只能跑一个，多人提交会自动排队",
+  engineUnavailable: "当前机器未检测到 LibreOffice，无法选择服务器端刷新",
+  waitingBadge: "排队等待中",
+  waitingHint: "前面有任务正在刷新目录页码，请稍候，任务不会丢失",
+} as const;
+
+export const TOC_PAGE_SOURCE_OPTIONS = [
+  { value: "client", label: TOC_PAGE_SOURCE.clientLabel, hint: TOC_PAGE_SOURCE.clientHint },
+  { value: "server", label: TOC_PAGE_SOURCE.serverLabel, hint: TOC_PAGE_SOURCE.serverHint },
+] as const;
+
+export type TocPageSource = (typeof TOC_PAGE_SOURCE_OPTIONS)[number]["value"];
+
+/** 默认走客户端计算：不占全局单点，天然支持并发。 */
+export const DEFAULT_TOC_PAGE_SOURCE: TocPageSource = "client";
+
 export const API = {
   convert: "/api/v1/documents/convert",
   engines: "/api/v1/engines",

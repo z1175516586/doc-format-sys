@@ -36,6 +36,36 @@ _TOC_ENTRY_LINE = re.compile(r"^\d+(?:\.\d+)*\D+\d+$")
 _TOC_FIELD = re.compile(r"\bTOC\b")
 
 
+def canonical_instruction(levels: str) -> str:
+    """规范化的 TOC 域指令：靠 ``\\o`` 大纲级别收集标题。"""
+    template = layout_rules()["toc"].get("field_instruction") or _TOC_FIELD_INSTR
+    return template.format(levels=levels)
+
+
+def _iter_field_instructions(root: etree._Element):
+    """按字段嵌套关系产出 (instrText 节点列表, 拼接后的指令)。
+
+    必须走 fldChar 状态机而不是"取某段下所有 instrText"：目录条目里每条
+    都挂着 PAGEREF 域，朴素拼接会把它们和 TOC 指令混成一条。
+    """
+    stack: list[dict[str, object]] = []
+    for node in root.iter():
+        tag = node.tag
+        if tag == qn("w:fldChar"):
+            kind = node.get(w_attr("fldCharType"))
+            if kind == "begin":
+                stack.append({"nodes": [], "sep": False})
+            elif kind == "separate" and stack:
+                stack[-1]["sep"] = True
+            elif kind == "end" and stack:
+                frame = stack.pop()
+                nodes = frame["nodes"]
+                if nodes:
+                    yield nodes, "".join(item.text or "" for item in nodes)
+        elif tag == qn("w:instrText") and stack:
+            stack[-1]["nodes"].append(node)  # type: ignore[union-attr]
+
+
 def is_generated_toc_line(text: str) -> bool:
     """判断一段是不是旧目录条目（编号标题后面直接粘着页码）。"""
     compact = re.sub(r"\s+", "", text or "")
@@ -279,7 +309,6 @@ class TocProcessor:
         self.flatten_entry_indents()
         title_para = self._build_title_paragraph(toc_title)
         field_para = self._build_toc_field_paragraph(toc_levels)
-
         index = body.index(anchor)
         body.insert(index, title_para)
         body.insert(index + 1, field_para)
@@ -319,10 +348,16 @@ class TocProcessor:
         return touched
 
     def apply_entry_fonts(self) -> int:
-        """目录条目样式：中文宋体四号，西文（引导点、页码）Times New Roman 四号。"""
-        fonts = layout_rules()["toc"]["fonts"]
+        """目录条目样式：中文宋体四号，西文（引导点、页码）Times New Roman 四号。
+
+        层级上限取 headings.max_level（有的文档到五级标题），只对已存在的
+        ``toc N`` 样式生效；Word 更新域时会自动补建缺失的那几条。
+        """
+        rules = layout_rules()
+        fonts = rules["toc"]["fonts"]
+        max_level = int(rules["headings"]["max_level"])
         return StyleProcessor(self.pkg).apply_style_font(
-            ["toc 1", "toc 2", "toc 3"],
+            [f"toc {level}" for level in range(1, max_level + 1)],
             east_asia=fonts["entry_east_asia"],
             ascii_font=fonts["entry_ascii"],
             size_pt=float(fonts["size_pt"]),
@@ -358,6 +393,7 @@ class TocProcessor:
 
     @staticmethod
     def _build_toc_field_paragraph(levels: str) -> etree._Element:
+        placeholder_text = layout_rules()["toc"].get("placeholder_text") or _PLACEHOLDER_TEXT
         p = etree.Element(qn("w:p"))
 
         def fld_char(kind: str) -> etree._Element:
@@ -371,13 +407,13 @@ class TocProcessor:
         instr_run = etree.SubElement(p, qn("w:r"))
         instr = etree.SubElement(instr_run, qn("w:instrText"))
         instr.set(qn("xml:space"), "preserve")
-        instr.text = _TOC_FIELD_INSTR.format(levels=levels)
+        instr.text = canonical_instruction(levels)
 
         fld_char("separate")
 
         placeholder_run = etree.SubElement(p, qn("w:r"))
         placeholder = etree.SubElement(placeholder_run, qn("w:t"))
-        placeholder.text = _PLACEHOLDER_TEXT
+        placeholder.text = placeholder_text
 
         fld_char("end")
         return p
@@ -391,6 +427,31 @@ class TocProcessor:
             if instr.text and _TOC_FIELD.search(instr.text.upper()):
                 return True
         return False
+
+    def normalize_field_instruction(self, levels: str | None = None) -> bool:
+        """把 TOC 域指令改写成 ``TOC \\o "x-y" \\h \\z \\u``。
+
+        必须做，因为排版引擎刷新域之后会重写这条指令。LibreOffice 实测把
+        ``TOC \\o "1-3" \\h \\z \\u`` 写成 ``TOC \\z \\u \\t "yhl的标题1,1" \\h``：
+        ``\\o`` 被丢掉，换成按样式名收集的 ``\\t``。而该样式在正文里一个段落都
+        没用到，于是 Word 右键「更新域」只能得到「未找到目录项。」——正是用户
+        看到的报错。改回 ``\\o`` 后，Word 按大纲级别收集，一级/二级/三级标题
+        都能正常进目录。
+        """
+        target = canonical_instruction(levels or layout_rules()["toc"]["levels"])
+        changed = False
+        for nodes, instruction in _iter_field_instructions(self.pkg.body):
+            if not _TOC_FIELD.search(instruction.upper()):
+                continue
+            if instruction == target:
+                continue
+            nodes[0].text = target
+            nodes[0].set(qn("xml:space"), "preserve")
+            for node in nodes[1:]:
+                node.text = ""
+            changed = True
+            logger.info("目录域指令已规范化: %s -> %s", instruction.strip(), target.strip())
+        return changed
 
 
 def graft_refreshed_toc(base_path: Path, refreshed_path: Path) -> str:
@@ -422,6 +483,17 @@ def graft_refreshed_toc(base_path: Path, refreshed_path: Path) -> str:
         refreshed_media,
     )
     return "grafted"
+
+
+def normalize_toc_instruction(path: Path, levels: str | None = None) -> bool:
+    """对落盘文件规范化 TOC 域指令（排版引擎刷新之后必须调用）。"""
+    if not path.is_file():
+        return False
+    with DocxPackage.open(path) as pkg:
+        if not TocProcessor(pkg).normalize_field_instruction(levels):
+            return False
+        pkg.save(path)
+    return True
 
 
 def strip_toc_leading_tabs(path: Path) -> int:

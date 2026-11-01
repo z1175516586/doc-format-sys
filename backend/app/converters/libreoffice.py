@@ -6,6 +6,10 @@
    然后退出——这是 unoconv / JODConverter 都要解决的核心问题。
 2. **超时保护**：soffice 偶发挂起，必须有硬超时，否则会拖垮 worker 池。
 3. **跨平台**：Windows / Linux 同一份实现，仅二进制路径不同。
+4. **域刷新串行**：见 ``_RefreshGate``。格式转换可以并行（各自独立进程），
+   但域刷新会抢同一个 soffice，并发时实测出现 ``soffice.bin 应用程序发生异常``。
+   想让页码不再依赖这个单点，用 ``w:updateFields`` 交给 Word 打开时计算
+   （见 ``app.domain.ooxml.update_fields``）。
 
 能力边界（诚实声明）：
 - doc -> docx、docx -> pdf：由 soffice 命令行完成，可靠
@@ -19,16 +23,166 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 
-from app.converters.base import ConverterCapabilities, DocConverter
+from app.converters.base import ConverterCapabilities, DocConverter, EnginePhaseCallback
 from app.core.config import get_settings
+from app.core.constants import layout_rules
 from app.core.errors import EngineUnavailableError, LayoutError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+# 引擎占用阶段。前端据此把"等待中"和"正在刷新"区分开。
+ENGINE_PHASE_WAITING = "waiting"
+ENGINE_PHASE_RUNNING = "running"
+
+
+class _RefreshGate:
+    """域刷新的并发闸门。
+
+    soffice 是全局单点：同时跑多份刷新，实测会出现
+    ``soffice.bin 应用程序发生异常`` 崩溃弹窗（同一实例并发时而成功时而失败，
+    不能赌）。因此固定串行：进程内用线程锁，跨进程用锁文件。
+
+    排队时要让用户看得见：进入闸门前先试一次非阻塞获取，失败就通过
+    ``on_phase`` 上报 waiting，取得后再上报 running。否则前端只会卡在
+    「刷新目录页码」一动不动，用户会以为程序死了。
+
+    要真正并行只能改架构（多实例池 + 每实例互斥 + 崩溃重启），
+    不是把某个并发数调大就能解决。
+    """
+
+    _LOCK_NAME = "libreoffice-refresh.lock"
+    _POLL_SECONDS = 0.05
+    _STALE_SECONDS = 900.0
+
+    def __init__(self) -> None:
+        self._thread_lock = threading.Lock()
+        self._held_file = False
+        self._on_phase: EnginePhaseCallback | None = None
+
+    def acquire(self, on_phase: EnginePhaseCallback | None = None) -> None:
+        """阻塞取得闸门；排队与开始执行都会通过 on_phase 通知。
+
+        ``on_phase`` 必须按调用传入、不能存在实例上：闸门是进程级单例，
+        多个任务并发时实例字段会互相覆盖——排队方拿到锁后回调已被别的任务
+        清掉，前端就永远停在「等待中」。
+        """
+        timeout = float(get_settings().libreoffice_lock_timeout_seconds)
+        messages = _engine_messages()
+
+        # 先试一次非阻塞：拿得到说明没人占，就不必打扰用户。
+        if not self._thread_lock.acquire(blocking=False):
+            self._notify(on_phase, ENGINE_PHASE_WAITING, messages["waiting"])
+            if not self._thread_lock.acquire(timeout=timeout):
+                raise _GateTimeout("等待域刷新线程锁超时")
+
+        try:
+            self._acquire_file_lock(timeout, messages, on_phase)
+        except Exception:
+            self._thread_lock.release()
+            raise
+
+        self._notify(on_phase, ENGINE_PHASE_RUNNING, messages["running"])
+
+    def release(self) -> None:
+        self._release_file_lock()
+        self._thread_lock.release()
+
+    def __enter__(self) -> "_RefreshGate":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.release()
+
+    @staticmethod
+    def _notify(
+        on_phase: EnginePhaseCallback | None,
+        phase: str,
+        message: str,
+    ) -> None:
+        if on_phase is None:
+            return
+        try:
+            on_phase(phase, message)
+        except Exception:  # 上报失败不得影响刷新
+            logger.debug("引擎阶段上报失败", exc_info=True)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _lock_path() -> Path:
+        base = Path(tempfile.gettempdir()) / "doc-format-sys"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / _RefreshGate._LOCK_NAME
+
+    def _acquire_file_lock(
+        self,
+        timeout: float,
+        messages: dict[str, str],
+        on_phase: EnginePhaseCallback | None,
+    ) -> None:
+        path = self._lock_path()
+        deadline = time.monotonic() + timeout
+        announced = False
+        while True:
+            try:
+                handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(handle, f"{os.getpid()}".encode())
+                os.close(handle)
+                self._held_file = True
+                return
+            except FileExistsError:
+                self._drop_if_stale(path)
+                if not announced:
+                    # 另一个进程占着锁文件（多 worker / 多实例部署）
+                    self._notify(on_phase, ENGINE_PHASE_WAITING, messages["waiting"])
+                    announced = True
+                if time.monotonic() >= deadline:
+                    raise _GateTimeout(f"域刷新锁文件被占用: {path}")
+                time.sleep(self._POLL_SECONDS)
+
+    def _drop_if_stale(self, path: Path) -> None:
+        """进程崩溃留下的锁文件按年龄清理，否则会永久卡死。"""
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            return
+        if age > self._STALE_SECONDS:
+            logger.warning("清理过期域刷新锁文件（%.0fs）: %s", age, path)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _release_file_lock(self) -> None:
+        if not self._held_file:
+            return
+        self._held_file = False
+        try:
+            self._lock_path().unlink(missing_ok=True)
+        except OSError:
+            logger.exception("删除域刷新锁文件失败")
+
+
+class _GateTimeout(RuntimeError):
+    """等待域刷新闸门超时。"""
+
+
+_REFRESH_GATE = _RefreshGate()
+
+
+def _engine_messages() -> dict[str, str]:
+    """排队/执行文案统一来自 config/layout_rules.json，不在代码里硬编码。"""
+    messages = layout_rules().get("toc", {}).get("engine_messages") or {}
+    return {
+        ENGINE_PHASE_WAITING: str(messages.get("waiting") or "正在排队等待排版引擎空闲"),
+        ENGINE_PHASE_RUNNING: str(messages.get("running") or "正在计算目录页码"),
+    }
 
 
 def _uno_available() -> bool:
@@ -176,22 +330,38 @@ class LibreOfficeConverter(DocConverter):
     # ------------------------------------------------------------------
     # 域刷新（主进程启动 soffice，LO Python 只负责连接）
     # ------------------------------------------------------------------
-    def refresh_fields(self, path: Path) -> bool:
+    def refresh_fields(
+        self,
+        path: Path,
+        on_phase: EnginePhaseCallback | None = None,
+    ) -> bool:
         """刷新目录页码与域。
 
         实测（Windows + LO 26.8）：让 LibreOffice 自带 Python 启动 soffice
         会失败（进程起来但不注册监听端口）。因此由**本进程**启动 soffice，
         LO Python 只做连接与刷新，这是唯一稳定的组合。
+
+        并发限制见 ``_REFRESH_GATE``：soffice 同时跑多份会崩（soffice.bin
+        异常），必须串行。跨进程也用锁文件兜住。``on_phase`` 用于把
+        「排队等待」「正在刷新」推给前端，避免用户以为卡死。
         """
         lo_python = self._resolve_python()
         binary = self._resolve_binary()
 
         if lo_python and binary:
-            return self._refresh_via_socket(binary, lo_python, Path(path))
+            _REFRESH_GATE.acquire(on_phase)
+            try:
+                return self._refresh_via_socket(binary, lo_python, Path(path))
+            finally:
+                _REFRESH_GATE.release()
 
         # 兜底：当前进程内已有 uno（Linux 装了 python3-uno 的情况）
         if _uno_available():
-            return self._refresh_fields_via_uno(Path(path))
+            _REFRESH_GATE.acquire(on_phase)
+            try:
+                return self._refresh_fields_via_uno(Path(path))
+            finally:
+                _REFRESH_GATE.release()
 
         logger.info("未找到 LibreOffice Python，跳过域刷新")
         return False

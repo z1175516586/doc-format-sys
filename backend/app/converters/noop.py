@@ -32,7 +32,7 @@ class NoopConverter(DocConverter):
     def convert(self, src: Path, dst: Path, target_format: str) -> Path:
         raise EngineUnavailableError("当前环境未配置排版引擎，无法执行格式转换")
 
-    def refresh_fields(self, path: Path) -> bool:
+    def refresh_fields(self, path: Path, on_phase=None) -> bool:
         logger.info("无可用引擎，跳过域刷新: %s", path.name)
         return False
 

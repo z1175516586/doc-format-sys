@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Radio,
   Col,
   Empty,
   Layout,
@@ -38,7 +39,20 @@ import {
   subscribeTask,
 } from "./api/client";
 import { AppIcon } from "./components/AppIcon";
-import { ACCEPTED_EXTENSIONS, API, APP_TITLE, DOCUMENT_TYPES, LINEAGE, NOTICES, STEP_LABELS, TOC_TITLE } from "./constants/app";
+import {
+  ACCEPTED_EXTENSIONS,
+  API,
+  APP_TITLE,
+  DEFAULT_TOC_PAGE_SOURCE,
+  DOCUMENT_TYPES,
+  LINEAGE,
+  NOTICES,
+  STEP_LABELS,
+  TOC_PAGE_SOURCE,
+  TOC_PAGE_SOURCE_OPTIONS,
+  TOC_TITLE,
+} from "./constants/app";
+import type { TocPageSource } from "./constants/app";
 import type { EngineInfo, LineageInspect, LineageNode, TemplateInfo, ValidationIssue } from "./types";
 import type { DataNode } from "antd/es/tree";
 
@@ -93,6 +107,14 @@ export default function App() {
   const [outputName, setOutputName] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
+  /**
+   * 目录页码由谁计算。二选一：这两种是同一件事的两种实现——
+   * 服务端算完落盘，客户端打开时又会重算一遍，同时开只是白占全局单点的引擎。
+   */
+  const [pageSource, setPageSource] = useState<TocPageSource>(DEFAULT_TOC_PAGE_SOURCE);
+  /** LibreOffice 被其他任务占用时，后端会推 waiting，这里切成「等待中」 */
+  const [waiting, setWaiting] = useState(false);
+  const [waitingMessage, setWaitingMessage] = useState("");
 
   useEffect(() => {
     fetchEngine().then(setEngine).catch(() => setEngine(null));
@@ -103,6 +125,16 @@ export default function App() {
     () => templates.filter((item) => item.kind === "content"),
     [templates],
   );
+
+  /** 服务端刷新依赖 LibreOffice，检测不到就禁用该选项，不能让用户选了必失败。 */
+  const serverUnavailable = engine ? !engine.available || !engine.refresh_fields : false;
+
+  // 引擎不可用时把已选的服务端方案回落到客户端，避免提交一个注定降级的任务
+  useEffect(() => {
+    if (serverUnavailable) {
+      setPageSource((current) => (current === "server" ? DEFAULT_TOC_PAGE_SOURCE : current));
+    }
+  }, [serverUnavailable]);
 
   async function loadHistory(next: File) {
     setLineage(null);
@@ -121,6 +153,8 @@ export default function App() {
     setOutputName("");
     setWarnings([]);
     setIssues([]);
+    setWaiting(false);
+    setWaitingMessage("");
   }
 
   async function onConvert() {
@@ -138,6 +172,9 @@ export default function App() {
     form.append("document_type", String(documentType));
     form.append("toc_title", TOC_TITLE);
     form.append("header_text", "");
+    // 互斥：服务端刷新与客户端更新只能二选一，同时为真会让引擎白算一遍
+    form.append("update_fields_on_open", String(pageSource === "client"));
+    form.append("server_refresh_fields", String(pageSource === "server"));
     if (templateId) {
       form.append("template_id", templateId);
     }
@@ -153,14 +190,26 @@ export default function App() {
         (event) => {
           if (event.type === "progress") {
             setPercent(event.percent);
+            // 引擎被占用时会推 engine_phase=waiting，此时明确显示排队，而不是干等
+            const isWaiting = event.data?.waiting === true;
+            setWaiting(isWaiting);
+            if (isWaiting) {
+              // 按钮上用短标签，长句放提示里
+              setWaitingMessage(event.message || TOC_PAGE_SOURCE.waitingHint);
+              setStepText(TOC_PAGE_SOURCE.waitingBadge);
+              return;
+            }
+            setWaitingMessage("");
             const label = event.step ? STEP_LABELS[event.step] ?? event.step : "";
             setStepText(label ? `${label}（${event.index}/${event.total}）` : event.message);
           }
           if (event.type === "error") {
+            setWaiting(false);
             message.error(event.message || "转换失败");
           }
           if (event.type === "done") {
             setPercent(100);
+            setWaiting(false);
             setStepText("排版完成");
             setDownloadUrl(event.data?.download_url || API.taskDownload(taskId));
             setOutputName(event.data?.output_name || "排版结果.docx");
@@ -296,9 +345,46 @@ export default function App() {
                     onChange={setTemplateId}
                   />
                 ) : null}
+
+                <div>
+                  <Text strong>{TOC_PAGE_SOURCE.title}</Text>
+                  <Radio.Group
+                    style={{ display: "block", marginTop: 4 }}
+                    value={pageSource}
+                    onChange={(event) => setPageSource(event.target.value as TocPageSource)}
+                  >
+                    <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                      {TOC_PAGE_SOURCE_OPTIONS.map((option) => {
+                        const disabled = option.value === "server" && serverUnavailable;
+                        return (
+                          <div key={option.value}>
+                            <Radio value={option.value} disabled={disabled}>
+                              {option.label}
+                            </Radio>
+                            <div>
+                              <Text type="secondary" style={{ paddingInlineStart: 24, fontSize: 12 }}>
+                                {disabled ? TOC_PAGE_SOURCE.engineUnavailable : option.hint}
+                              </Text>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </Space>
+                  </Radio.Group>
+                </div>
+
                 <Button type="primary" block size="large" loading={running} onClick={() => void onConvert()}>
                   {running ? stepText || "转换中" : "开始转换文档"}
                 </Button>
+                {waiting ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    icon={<AppIcon icon={Info} />}
+                    message={TOC_PAGE_SOURCE.waitingBadge}
+                    description={waitingMessage || TOC_PAGE_SOURCE.waitingHint}
+                  />
+                ) : null}
                 {running || percent > 0 ? <Progress percent={percent} status={downloadUrl ? "success" : "active"} /> : null}
               </Space>
 
@@ -401,7 +487,9 @@ export default function App() {
                         selectable={false}
                         selectedKeys={lineage.current_node_id ? [lineage.current_node_id] : []}
                         treeData={[lineageTreeData(lineage.tree)]}
-                        titleRender={(item) => item.title}
+                        titleRender={(item) =>
+                          typeof item.title === "function" ? item.title(item) : item.title
+                        }
                       />
                     </div>
                   ) : null}

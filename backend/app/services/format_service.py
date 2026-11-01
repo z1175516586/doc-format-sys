@@ -24,6 +24,7 @@ from app.converters.base import DocConverter
 from app.converters.registry import get_converter
 from app.core.config import get_settings
 from app.core.constants import cover_config, layout_rules
+from app.converters.libreoffice import ENGINE_PHASE_RUNNING, ENGINE_PHASE_WAITING
 from app.core.errors import (
     AppError,
     DocumentValidationError,
@@ -43,7 +44,13 @@ from app.domain.ooxml.repair import DocumentRepairer
 from app.domain.ooxml.sections import SectionProcessor
 from app.domain.ooxml.styles import StyleProcessor
 from app.domain.ooxml.tables import TableProcessor
-from app.domain.ooxml.toc import TocProcessor, graft_refreshed_toc, strip_toc_leading_tabs
+from app.domain.ooxml.toc import (
+    TocProcessor,
+    graft_refreshed_toc,
+    normalize_toc_instruction,
+    strip_toc_leading_tabs,
+)
+from app.domain.ooxml.update_fields import UpdateFieldsFlag, enable_update_fields
 from app.domain.ooxml.validate import StructuralValidator
 from app.schemas.document import ConvertOptions, FormatRequest, FormatResult, StepReport
 from app.services.cover_service import CoverService
@@ -57,7 +64,16 @@ def _document_type_label(document_type: int) -> str:
     spec = types.get(str(document_type)) or types["1"]
     return f"{spec['primary']}{spec.get('secondary', '')}"
 
-ProgressCallback = Callable[[str, int, int, str], None]
+ProgressCallback = Callable[[str, int, int, str, "dict[str, object] | None"], None]
+
+
+def _engine_phase_data(phase: str) -> dict[str, object]:
+    """引擎占用阶段的进度事件载荷，前端据此显示「等待中」。
+
+    ``waiting`` 表示任务在排队等 LibreOffice 空闲（全局单点，串行执行）；
+    ``running`` 表示已拿到引擎开始算页码。
+    """
+    return {"engine_phase": phase, "waiting": phase == ENGINE_PHASE_WAITING}
 
 # 步骤清单：顺序即执行顺序，名称对前端可见，改动需同步文档
 PIPELINE_STEPS: tuple[str, ...] = (
@@ -106,6 +122,10 @@ class _PipelineState:
     warnings: list[str] = field(default_factory=list)
     issues: list[dict[str, object]] = field(default_factory=list)
     heading_report: object | None = None
+    # 进度回调：引擎排队等资源时用它推「等待中」，见 _step_engine
+    on_progress: ProgressCallback | None = None
+    step_index: int = 0
+    step_total: int = 0
 
 
 class DocumentFormatService:
@@ -133,12 +153,15 @@ class DocumentFormatService:
             output_path=Path(request.output_path),
             options=request.options,
             template_path=Path(request.template_path) if request.template_path else None,
+            on_progress=on_progress,
+            step_total=len(PIPELINE_STEPS),
         )
 
         reports: list[StepReport] = []
         total = len(PIPELINE_STEPS)
 
         for index, step_name in enumerate(PIPELINE_STEPS, start=1):
+            state.step_index = index
             self._emit(on_progress, step_name, index, total, f"开始 {step_name}")
             step_started = time.perf_counter()
             try:
@@ -201,10 +224,11 @@ class DocumentFormatService:
         index: int,
         total: int,
         message: str,
+        data: dict[str, object] | None = None,
     ) -> None:
         if callback is not None:
             try:
-                callback(step, index, total, message)
+                callback(step, index, total, message, data)
             except Exception:  # 进度回调不得影响主流程
                 logger.debug("进度回调异常", exc_info=True)
 
@@ -521,40 +545,97 @@ class DocumentFormatService:
             )
 
     def _step_engine(self, state: _PipelineState) -> dict[str, object]:
-        """交给排版引擎刷新域。
+        """按用户选择决定目录页码由谁计算。
 
-        引擎不支持时必须显式告警：目录页码需要用户在 Word 中按 F9 更新。
-        这正是原实现"静默跳过 COM 不可用"的地方，会造成交付文档目录页码为 0。
+        二选一，两者是同一件事的两种实现，不能叠加（``ConvertOptions`` 会校验）：
+
+        - ``update_fields_on_open``：写 ``w:updateFields``，Word/WPS 打开时自己算。
+          不占服务器资源，是并发场景下唯一不受全局引擎限制的方式。
+        - ``server_refresh_fields``：用 LibreOffice 在服务器端预刷新。
+          交付时页码就已精确，但 soffice 是全局单点，``refresh_fields`` 内部
+          走 ``_RefreshGate`` 加锁串行，防止多任务同时抢同一个实例把 soffice.bin 搞崩。
+
+        两个都关时必须告警，否则目录页码会停在占位文字上。
         """
+        pkg = self._pkg(state)
+        mark_open_update = bool(state.options.update_fields_on_open)
+        server_refresh = bool(state.options.server_refresh_fields)
+        if mark_open_update:
+            UpdateFieldsFlag().enable(pkg)
+
+        if not server_refresh:
+            # 页码完全交给 Word/WPS 打开时计算：服务器端不碰 soffice，没有并发单点。
+            # save 步骤在 engine 之前，这里必须自己落盘，否则 updateFields 只留在内存里。
+            pkg.save(state.output_path)
+            if not mark_open_update:
+                state.warnings.append(
+                    "服务器端未刷新且未启用打开时更新域：目录页码可能仍是占位内容"
+                )
+            return {
+                "skipped": True,
+                "reason": "server_refresh_disabled",
+                "update_fields": mark_open_update,
+            }
+
         capabilities = self.converter.capabilities()
         if not capabilities.available:
             state.warnings.append(
                 "未配置排版引擎：目录页码未刷新，请在 Word/WPS 中右键目录选择「更新域」"
             )
-            return {"skipped": True, "reason": "engine_unavailable"}
+            return {"skipped": True, "reason": "engine_unavailable", "update_fields": mark_open_update}
 
         if not capabilities.refresh_fields:
             state.warnings.append(
                 "当前引擎不支持域刷新：目录页码需手动更新（安装 python-uno 可自动化）"
             )
-            return {"skipped": True, "reason": "refresh_unsupported"}
+            return {"skipped": True, "reason": "refresh_unsupported", "update_fields": mark_open_update}
 
-        pkg = self._pkg(state)
         pkg.save(state.output_path)
         backup = state.output_path.with_name(state.output_path.stem + ".before-refresh.docx")
         shutil.copyfile(state.output_path, backup)
+        waited = False
+
+        def on_phase(phase: str, message: str) -> None:
+            """把引擎排队/执行状态推给前端，避免用户以为卡死。"""
+            nonlocal waited
+            if phase == ENGINE_PHASE_WAITING:
+                waited = True
+            self._emit(
+                state.on_progress,
+                "engine",
+                state.step_index,
+                state.step_total,
+                message,
+                _engine_phase_data(phase),
+            )
+
         try:
-            refreshed = self.converter.refresh_fields(state.output_path)
+            try:
+                refreshed = self.converter.refresh_fields(state.output_path, on_phase=on_phase)
+            except Exception as exc:  # 闸门等待超时/引擎崩溃都不该让整个任务失败
+                logger.warning("域刷新异常，降级为打开时更新: %s", exc)
+                state.warnings.append(f"域刷新未完成（{exc}），已设置为打开文档时自动更新")
+                refreshed = False
             if refreshed:
                 graft_refreshed_toc(backup, state.output_path)
                 strip_toc_leading_tabs(state.output_path)
+            # 引擎会重写 TOC 指令（LibreOffice 把 \o 换成指向空样式的 \t），
+            # 不还原的话 Word 更新域只会得到「未找到目录项」。无论刷新成功与否都校正。
+            normalize_toc_instruction(state.output_path)
+            # 引擎整包回写可能丢掉 settings.xml 里的开关，这里落盘后再补一次。
+            if mark_open_update:
+                enable_update_fields(state.output_path)
         finally:
             backup.unlink(missing_ok=True)
             # 引擎会把右对齐定位符改成普通制表符，并保留页脚环绕，这里按成品再校正一次。
             self._polish_saved_chrome(state)
         if not refreshed:
             state.warnings.append("域刷新未成功，目录页码可能仍是占位内容")
-        return {"refreshed": refreshed}
+        return {
+            "refreshed": refreshed,
+            "update_fields": mark_open_update,
+            "queued": waited,
+        }
 
     def _step_save(self, state: _PipelineState) -> dict[str, object]:
         self._apply_body_header(state)

@@ -13,6 +13,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+
+# 引擎占用阶段回调：(phase, message)，phase 取 "waiting" | "running"
+EnginePhaseCallback = Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -56,8 +60,16 @@ class DocConverter(ABC):
         """格式转换（如 doc -> docx, docx -> pdf）。"""
 
     @abstractmethod
-    def refresh_fields(self, path: Path) -> bool:
+    def refresh_fields(
+        self,
+        path: Path,
+        on_phase: "EnginePhaseCallback | None" = None,
+    ) -> bool:
         """刷新域（目录页码、交叉引用）。
+
+        ``on_phase(phase, message)`` 用于把执行状态推给前端：``waiting`` 表示
+        正在排队等排版引擎空闲，``running`` 表示已开始刷新。引擎是全局单点时
+        这个回调是必要的——否则用户看到进度条不动会以为程序卡死。
 
         返回 False 表示引擎不支持，调用方必须据此在结果中标记"目录需手动更新"，
         不得静默当作成功。

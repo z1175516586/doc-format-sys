@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.converters.noop import NoopConverter
 from app.core.namespaces import NSMAP, qn
 from app.domain.ooxml.package import DocxPackage, paragraph_text
@@ -115,11 +117,140 @@ def test_output_reopenable_by_python_docx(sample_docx: Path, tmp_path: Path) -> 
     assert len(doc.paragraphs) > 0
 
 
-def test_warning_when_engine_unavailable(sample_docx: Path, tmp_path: Path) -> None:
-    """无引擎时必须显式告警，不能静默认为目录页码已更新。"""
-    success, _, result = _run(sample_docx, tmp_path / "out.docx")
+def test_no_warning_when_page_numbers_left_to_word(sample_docx: Path, tmp_path: Path) -> None:
+    """默认配置关掉服务端刷新，页码交给 Word 打开时算，不算风险，不该告警。"""
+    success, output, result = _run(sample_docx, tmp_path / "out.docx")
+    assert success
+    assert not any("目录页码" in warning for warning in result.warnings)
+
+    with DocxPackage.open(output) as pkg:
+        settings = pkg.xml("word/settings.xml")
+        assert settings.find(qn("w:updateFields")) is not None
+
+
+def test_warning_when_no_page_number_source(sample_docx: Path, tmp_path: Path) -> None:
+    """服务端不刷新、又不让 Word 更新域时，必须显式告警。"""
+    success, _, result = _run(
+        sample_docx,
+        tmp_path / "out.docx",
+        update_fields_on_open=False,
+        server_refresh_fields=False,
+    )
     assert success
     assert any("目录页码" in warning for warning in result.warnings)
+
+
+def test_page_number_source_options_override_config(sample_docx: Path, tmp_path: Path) -> None:
+    """前端选择优先于配置文件默认值。"""
+    success, output, result = _run(
+        sample_docx,
+        tmp_path / "out.docx",
+        update_fields_on_open=False,
+        server_refresh_fields=False,
+    )
+    assert success
+
+    with DocxPackage.open(output) as pkg:
+        settings = pkg.xml("word/settings.xml")
+        assert settings.find(qn("w:updateFields")) is None
+
+    engine = next(step for step in result.steps if step.name == "engine")
+    assert engine.stats["skipped"] is True
+    assert engine.stats["update_fields"] is False
+
+
+def test_both_page_sources_rejected() -> None:
+    """两个来源同时开启必须被拒绝，不能默默白占全局引擎。"""
+    from pydantic import ValidationError as PydanticValidationError
+
+    with pytest.raises(PydanticValidationError):
+        ConvertOptions(update_fields_on_open=True, server_refresh_fields=True)
+
+
+def test_single_page_source_choice_clears_the_other() -> None:
+    """只传一个开关时，另一个必须收敛为 False，不能回落到配置默认造出矛盾组合。"""
+    from app.api.v1.documents import _resolve_page_source
+
+    # 只选服务端：客户端更新必须关掉（配置默认为 True，不能漏过来）
+    assert _resolve_page_source(None, True) == (False, True)
+    # 只选客户端
+    assert _resolve_page_source(True, None) == (True, False)
+    # 都不传：取配置默认
+    assert _resolve_page_source(None, None) == (True, False)
+    # 都传且不矛盾
+    assert _resolve_page_source(False, True) == (False, True)
+
+
+def test_engine_waiting_event_reaches_progress(sample_docx: Path, tmp_path: Path) -> None:
+    """引擎排队时必须把 waiting 推给前端，否则用户以为程序卡死。"""
+
+    class _QueueingConverter(NoopConverter):
+        def capabilities(self):
+            from app.converters.base import ConverterCapabilities
+
+            return ConverterCapabilities(
+                name="fake", available=True, refresh_fields=True
+            )
+
+        def refresh_fields(self, path, on_phase=None) -> bool:
+            if on_phase is not None:
+                on_phase("waiting", "前面有任务，已排队")
+                on_phase("running", "已取得引擎")
+            return False
+
+    options = ConvertOptions(
+        use_cover_template=False,
+        server_refresh_fields=True,
+        update_fields_on_open=False,
+    )
+    request = FormatRequest(
+        source_path=str(sample_docx),
+        output_path=str(tmp_path / "out.docx"),
+        options=options,
+    )
+    events: list[dict[str, object]] = []
+
+    def on_progress(step, index, total, message, data=None):
+        if data and data.get("engine_phase"):
+            events.append(dict(data))
+
+    DocumentFormatService(converter=_QueueingConverter()).format(
+        request, on_progress=on_progress
+    )
+
+    phases = [event["engine_phase"] for event in events]
+    assert phases == ["waiting", "running"]
+    assert events[0]["waiting"] is True
+    assert events[1]["waiting"] is False
+
+
+def test_refresh_gate_serializes_and_reports_phase() -> None:
+    """闸门必须串行，且排队方要收到 waiting、拿到后收到 running。"""
+    import threading
+    import time
+
+    from app.converters.libreoffice import (
+        ENGINE_PHASE_RUNNING,
+        ENGINE_PHASE_WAITING,
+        _RefreshGate,
+    )
+
+    gate = _RefreshGate()
+    phases: list[str] = []
+
+    gate.acquire()
+    worker = threading.Thread(
+        target=lambda: (gate.acquire(on_phase=lambda phase, _: phases.append(phase)), gate.release()),
+    )
+    try:
+        worker.start()
+        time.sleep(0.2)  # 让 worker 先卡在闸门上
+    finally:
+        gate.release()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive(), "worker 未能在主线程释放后通过闸门"
+    assert phases == [ENGINE_PHASE_WAITING, ENGINE_PHASE_RUNNING]
 
 
 def test_missing_source_fails_cleanly(tmp_path: Path) -> None:

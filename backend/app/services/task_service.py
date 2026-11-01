@@ -161,6 +161,7 @@ class TaskService:
         index: int,
         total: int,
         message: str,
+        data: dict[str, Any] | None = None,
     ) -> None:
         task = self.get(task_id)
         task.current_step = step
@@ -177,6 +178,7 @@ class TaskService:
                 total=total,
                 percent=task.percent,
                 message=message,
+                data=data,
             )
         )
 

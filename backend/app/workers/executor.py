@@ -53,8 +53,14 @@ class TaskExecutor:
         service = DocumentFormatService()
         self.tasks.mark_running(task_id, len(PIPELINE_STEPS))
 
-        def on_progress(step: str, index: int, total: int, message: str) -> None:
-            self.tasks.report_progress(task_id, step, index, total, message)
+        def on_progress(
+            step: str,
+            index: int,
+            total: int,
+            message: str,
+            data: dict[str, object] | None = None,
+        ) -> None:
+            self.tasks.report_progress(task_id, step, index, total, message, data)
 
         try:
             result = service.format(request, on_progress=on_progress)

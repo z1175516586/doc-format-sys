@@ -58,7 +58,14 @@ export interface ProgressEvent {
   total: number;
   percent: number;
   message: string;
-  data?: { download_url?: string; output_name?: string; code?: string } | null;
+  data?: {
+    download_url?: string;
+    output_name?: string;
+    code?: string;
+    /** 排版引擎占用阶段：waiting 表示在排队等 LibreOffice 空闲 */
+    engine_phase?: "waiting" | "running";
+    waiting?: boolean;
+  } | null;
 }
 
 export interface ValidationIssue {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.core.constants import layout_rules
 
@@ -23,6 +23,28 @@ class ConvertOptions(BaseModel):
     remove_highlights: bool = Field(default=True, description="是否清除高亮与底纹")
     convert_numbering: bool = Field(default=True, description="是否把自动编号固化为文本")
     apply_template: bool = Field(default=True, description="是否应用模板的页眉页脚")
+    update_fields_on_open: bool = Field(
+        default_factory=lambda: bool(layout_rules()["toc"]["update_fields_on_open"]),
+        description="打开文档时让 Word/WPS 自动更新域（页码由客户端算，服务器端零占用）",
+    )
+    server_refresh_fields: bool = Field(
+        default_factory=lambda: bool(layout_rules()["toc"]["server_refresh_fields"]),
+        description="用 LibreOffice 在服务器端预刷新目录页码（占全局引擎，内部加锁串行）",
+    )
+
+    @model_validator(mode="after")
+    def _single_page_source(self) -> "ConvertOptions":
+        """页码只能有一个来源。
+
+        两个开关是同一个决策的两种实现：服务端算完落盘，客户端打开时又会重算一遍，
+        同时为真只是白占全局单点的排版引擎，且会让「是否需要告警」的判断失去意义。
+        前端已是单选，这里再兜一层，防止别的调用方（脚本、旧客户端）造出矛盾状态。
+        """
+        if self.update_fields_on_open and self.server_refresh_fields:
+            raise ValueError(
+                "update_fields_on_open 与 server_refresh_fields 互斥，请只启用其中一个"
+            )
+        return self
 
 
 class FormatRequest(BaseModel):

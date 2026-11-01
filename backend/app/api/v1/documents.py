@@ -35,8 +35,21 @@ def _build_options(
     remove_highlights: bool,
     convert_numbering: bool,
     apply_template: bool,
+    update_fields_on_open: bool | None = None,
+    server_refresh_fields: bool | None = None,
 ) -> ConvertOptions:
     """把表单字段组装为选项对象，默认值统一来自配置文件。"""
+    if update_fields_on_open and server_refresh_fields:
+        # 二选一：两种方式是同一件事的两种实现，同时开启只是白占全局引擎
+        raise ValidationError(
+            "update_fields_on_open 与 server_refresh_fields 只能选一个",
+            detail={"update_fields_on_open": True, "server_refresh_fields": True},
+        )
+
+    open_on_open, server_refresh = _resolve_page_source(
+        update_fields_on_open, server_refresh_fields
+    )
+
     default_title = layout_rules()["toc"]["default_title"]
     return ConvertOptions(
         toc_title=toc_title or default_title,
@@ -48,7 +61,29 @@ def _build_options(
         remove_highlights=remove_highlights,
         convert_numbering=convert_numbering,
         apply_template=apply_template,
+        update_fields_on_open=open_on_open,
+        server_refresh_fields=server_refresh,
     )
+
+
+def _resolve_page_source(
+    update_fields_on_open: bool | None,
+    server_refresh_fields: bool | None,
+) -> tuple[bool, bool]:
+    """把两个可缺省开关收敛成一对互斥值。
+
+    - 都不传：取配置默认（默认是客户端更新）
+    - 只传一个：另一个必为 False，因为「选了这种方式」本身就排除了另一种
+
+    只传 ``server_refresh_fields=True`` 而让另一个回落到配置默认 ``True`` 会
+    造出矛盾组合，这里必须显式收敛，不能交给默认值碰运气。
+    """
+    if update_fields_on_open is None and server_refresh_fields is None:
+        toc_rules = layout_rules()["toc"]
+        return bool(toc_rules["update_fields_on_open"]), bool(toc_rules["server_refresh_fields"])
+    if server_refresh_fields is not None:
+        return update_fields_on_open is True, server_refresh_fields
+    return bool(update_fields_on_open), False
 
 
 async def _prepare_request(
@@ -104,6 +139,12 @@ async def convert_async(
     remove_highlights: bool = Form(True),
     convert_numbering: bool = Form(True),
     apply_template: bool = Form(True),
+    update_fields_on_open: bool | None = Form(
+        None, description="打开文档时让 Word/WPS 自动更新域（页码由客户端算）"
+    ),
+    server_refresh_fields: bool | None = Form(
+        None, description="服务器端用 LibreOffice 预刷新目录页码（内部加锁串行）"
+    ),
 ) -> dict:
     """提交任务后立即返回 task_id，进度通过 SSE 订阅。
 
@@ -119,6 +160,8 @@ async def convert_async(
         remove_highlights,
         convert_numbering,
         apply_template,
+        update_fields_on_open,
+        server_refresh_fields,
     )
     request = await _prepare_request(file, template_file, template_id, options)
     request = _attach_source_node(request)
@@ -156,6 +199,8 @@ async def convert_sync(
     remove_highlights: bool = Form(True),
     convert_numbering: bool = Form(True),
     apply_template: bool = Form(True),
+    update_fields_on_open: bool | None = Form(None),
+    server_refresh_fields: bool | None = Form(None),
 ) -> FileResponse:
     """同步排版，直接返回 docx 文件。
 
@@ -171,6 +216,8 @@ async def convert_sync(
         remove_highlights,
         convert_numbering,
         apply_template,
+        update_fields_on_open,
+        server_refresh_fields,
     )
     request = await _prepare_request(file, template_file, template_id, options)
     request = _attach_source_node(request)

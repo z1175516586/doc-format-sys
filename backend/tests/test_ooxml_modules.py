@@ -198,6 +198,31 @@ def test_toc_title_replace(sample_docx: Path) -> None:
         assert "目  录" in texts
 
 
+def test_toc_instruction_normalized_after_engine_rewrite(sample_docx: Path) -> None:
+    """排版引擎会把 \\o 改成指向空样式的 \\t，必须还原，否则 Word 更新域无条目。
+
+    LibreOffice 实测输出 ``TOC \\z \\u \\t "yhl的标题1,1" \\h``：该样式在正文里
+    零段落使用，Word 右键「更新域」只会显示「未找到目录项。」。
+    """
+    with DocxPackage.open(sample_docx) as pkg:
+        processor = TocProcessor(pkg)
+        assert processor.insert_field()
+        engine_written = ' TOC \\z \\u \\t "yhl的标题1,1" \\h '
+        for instr in pkg.body.iter(qn("w:instrText")):
+            if "TOC" in (instr.text or "").upper():
+                instr.text = engine_written
+
+        assert processor.normalize_field_instruction("1-3")
+        instructions = [
+            node.text
+            for node in pkg.body.iter(qn("w:instrText"))
+            if "TOC" in (node.text or "").upper()
+        ]
+        assert instructions == [' TOC \\o "1-3" \\h \\z \\u ']
+        # 幂等：已经是规范形式就不再改写
+        assert not processor.normalize_field_instruction("1-3")
+
+
 def _settings_flag(root: etree._Element, tag: str) -> etree._Element | None:
     found = root.find(qn(tag))
     if found is not None:

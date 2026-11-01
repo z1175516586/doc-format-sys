@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     layout_engine: str = "auto"
     libreoffice_binary: str = "soffice"
     libreoffice_timeout_seconds: int = 300
+    # 域刷新是全局单点，必须串行；等待闸门的最长时间
+    libreoffice_lock_timeout_seconds: int = 600
 
     @property
     def upload_dir(self) -> Path:
