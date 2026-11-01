@@ -479,6 +479,24 @@ def test_body_header_aligns_and_footer_line_is_full(tmp_path: Path) -> None:
         assert list(snippet.iter(qn("wp:wrapNone")))
 
 
+def test_media_name_collision_renamed_without_user_warning(sample_docx: Path) -> None:
+    """模板图标与正文插图同名时必须另存，但不得给用户弹告警。
+
+    重名是常态：目标文档与模板的第一张图都叫 image1.png，内容却不同
+    （正文插图 vs 页眉图标）。这只是包内文件名安排，用户无需知情。
+    """
+    from app.services.template_service import TemplateService
+
+    with DocxPackage.open(sample_docx) as pkg:
+        pkg.add_part("word/media/collide.png", b"body-image")
+        service = TemplateService()
+        name = service._unique_part_name(pkg, "word/media/collide.png", b"header-logo")
+
+        assert name != "word/media/collide.png", "重名时未另存，会覆盖正文插图"
+        assert pkg.read(name) == b"header-logo"
+        assert pkg.read("word/media/collide.png") == b"body-image", "正文插图被覆盖"
+
+
 def test_front_cover_header_footer_cleared(sample_docx: Path) -> None:
     from docx import Document
 

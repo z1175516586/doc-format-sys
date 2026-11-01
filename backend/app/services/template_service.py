@@ -190,7 +190,9 @@ class TemplateService:
         header 部件的内容，footer 同理。这样目标文档原有的 rels 结构保持有效，
         不需要重建引用关系。
 
-        返回告警列表（媒体冲突等），调用方需将其透出给用户，不得静默吞掉。
+        返回告警列表，调用方需将其透出给用户，不得静默吞掉。
+        注意：媒体文件重名后自动另存**不是**告警，只是包内命名安排，见
+        ``_unique_part_name``，只记 debug 日志。
         """
         warnings: list[str] = []
 
@@ -676,7 +678,7 @@ class TemplateService:
                 continue
 
             data = template.read(source_media)
-            new_name = self._unique_part_name(target, source_media, data, warnings)
+            new_name = self._unique_part_name(target, source_media, data)
             relative = posixpath.relpath(new_name, "word")
             self._append_rel(new_root, rel.get("Id") or "", rel_type, relative, False)
 
@@ -708,9 +710,13 @@ class TemplateService:
         target: DocxPackage,
         source_name: str,
         data: bytes,
-        warnings: list[str],
     ) -> str:
-        """为迁入的媒体文件找不冲突的名字；内容相同则直接复用。"""
+        """为迁入的媒体文件找不冲突的名字；内容相同则直接复用。
+
+        重名是常态而非异常：目标文档和模板的第一张图都叫 ``image1.png``，
+        但内容不同（正文插图 vs 页眉图标）。此时必须另存，否则会覆盖正文图片。
+        这只是包内文件名的安排，用户无需知情，因此只记 debug 日志、不进告警。
+        """
         if target.has(source_name):
             if target.read(source_name) == data:
                 return source_name
@@ -719,8 +725,9 @@ class TemplateService:
             for index in range(1, 1000):
                 candidate = f"{posixpath.join(directory, posixpath.basename(stem))}_{index}{dot}{ext}"
                 if not target.has(candidate):
-                    warnings.append(
-                        f"媒体文件重名，已另存为 {posixpath.basename(candidate)}"
+                    logger.debug(
+                        "媒体文件重名，已另存为 %s（避免覆盖已有同名部件）",
+                        posixpath.basename(candidate),
                     )
                     target.add_part(candidate, data)
                     self._ensure_media_content_type(target, candidate)
