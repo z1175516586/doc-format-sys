@@ -126,6 +126,7 @@ pytest -q
 
 - [重构架构与迁移方案](docs/REFACTOR_PLAN.md)
 - [重构变更记录](docs/REFACTOR_CHANGELOG.md)
+- [文档身份 nodeId 编辑保存后丢失](docs/202611011035-文档身份nodeId编辑保存丢失.md)
 
 ---
 

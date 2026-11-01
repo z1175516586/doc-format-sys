@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 from shutil import copyfile
 
+from lxml import etree
+
+from app.core.namespaces import qn, w_attr
 from app.domain.ooxml.lineage import LineageStamp
 from app.domain.ooxml.package import DocxPackage
 from app.schemas.document import FormatResult
@@ -34,6 +38,67 @@ def test_stamp_roundtrip(sample_docx: Path, tmp_path: Path) -> None:
     copyfile(sample_docx, target)
     LineageStamp().write(target, "abc123")
     assert LineageStamp().read(target) == "abc123"
+
+
+def test_stamp_lives_in_settings_docvars(sample_docx: Path, tmp_path: Path) -> None:
+    """身份必须写在 settings.xml 的 w:docVars，Word/WPS 编辑保存后才不会丢。
+
+    旧方案写在 customXml 部件，Word 另存时会整块删掉，导致 node_id 消失。
+    """
+    target = tmp_path / "stamped.docx"
+    copyfile(sample_docx, target)
+    LineageStamp().write(target, "abc123")
+
+    with zipfile.ZipFile(target) as zf:
+        settings = etree.fromstring(zf.read("word/settings.xml"))
+        names = zf.namelist()
+
+    doc_vars = settings.find(qn("w:docVars"))
+    assert doc_vars is not None, "settings.xml 缺少 w:docVars"
+    values = {
+        var.get(w_attr("name")): var.get(w_attr("val"))
+        for var in doc_vars.findall(qn("w:docVar"))
+    }
+    assert values["DocHistoryId"] == "abc123"
+
+    assert not any("dfsLineage" in name for name in names), "不应再产生 customXml 身份部件"
+
+
+def test_docvars_follow_settings_schema_order(sample_docx: Path, tmp_path: Path) -> None:
+    """w:docVars 必须排在 rsids / mathPr 等元素之前，否则 Word 判定结构非法。"""
+    target = tmp_path / "stamped.docx"
+    copyfile(sample_docx, target)
+    LineageStamp().write(target, "abc123")
+
+    with zipfile.ZipFile(target) as zf:
+        settings = etree.fromstring(zf.read("word/settings.xml"))
+
+    tags: list[str] = []
+    for child in settings:
+        try:
+            tags.append(etree.QName(child).localname)
+        except ValueError:
+            continue
+    position = tags.index("docVars")
+    for later in ("rsids", "mathPr", "themeFontLang", "decimalSymbol", "listSeparator"):
+        if later in tags:
+            assert position < tags.index(later), f"docVars 应排在 {later} 之前"
+
+
+def test_legacy_custom_xml_still_recognized(sample_docx: Path, tmp_path: Path) -> None:
+    """旧文档的身份写在 customXml 里，读取仍要识别出来。"""
+    target = tmp_path / "legacy.docx"
+    copyfile(sample_docx, target)
+    stamp = LineageStamp()
+    with DocxPackage.open(target) as pkg:
+        pkg.remove_part(stamp.settings_part)
+        pkg.add_part(
+            stamp.part_name,
+            f'<?xml version="1.0" encoding="UTF-8"?><lineage xmlns="{stamp.namespace}">'
+            f"<nodeId>legacy-999</nodeId></lineage>".encode("utf-8"),
+        )
+        pkg.save(target)
+    assert stamp.read(target) == "legacy-999"
 
 
 def test_unknown_file_has_empty_tree(sample_docx: Path, tmp_path: Path) -> None:

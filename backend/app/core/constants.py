@@ -198,6 +198,8 @@ DEFAULT_VALIDATION_RULES: dict[str, Any] = {
 }
 
 DEFAULT_LINEAGE: dict[str, Any] = {
+    "docvar_name": "DocHistoryId",
+    "settings_part": "word/settings.xml",
     "part_name": "customXml/dfsLineage.xml",
     "props_name": "customXml/dfsLineageProps.xml",
     "rels_name": "customXml/_rels/dfsLineage.xml.rels",
