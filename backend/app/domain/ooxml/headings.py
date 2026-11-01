@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from lxml import etree
 
@@ -32,7 +33,8 @@ logger = get_logger(__name__)
 
 # 标题编号正则：1 / 1.2 / 1.2.3 ...，且编号后紧跟的非空白字符不能是 ) . 、 -
 # 这条排除规则很关键：正文里 "1." "1、" 之类的列表项不应被误判为标题
-_HEADING_PATTERN = re.compile(r"^(\d+(?:\.\d+){0,4})[\s\t]*(?![)）\.、\-])(.+)$")
+# 第 2 组是编号与标题之间的空白，识别时需要它区分 "9.3设计依据" 与 "10kV电压"
+_HEADING_PATTERN = re.compile(r"^(\d+(?:\.\d+){0,4})([ \t\u3000]*)(?![)）\.、\-])(.+)$")
 
 # 规范写法：编号与标题之间必须有空白（校验用，不改变识别口径）
 _STRICT_HEADING_PATTERN = re.compile(r"^(\d+(?:\.\d+){0,4})[ \t\u3000]+(\S.*)$")
@@ -107,6 +109,66 @@ def _balanced_brackets(text: str) -> bool:
     return extra < 1
 
 
+# 段落以这些标点收尾时是句子而非标题标题。冒号不列入：项目文档里
+# 「3.1.3 结构设计基本资料：」这类以冒号结尾的标题很常见，排除会漏标题。
+_PROSE_TAIL = ("。", "；", ";")
+
+
+def _looks_like_numbered_value(gap: str, rest: str) -> bool:
+    """判断"编号紧贴内容"的段落是不是以数字开头的正文，而不是标题。
+
+    只在编号与标题之间**没有任何空白**时才有歧义，判据是紧跟着的那个字符：
+
+    - 紧跟非汉字（字母、数字、百分号等）→ 正文。
+      ``10kV电压引自…``、``380V低压配电``、``3.5m标高``、``1.5%`` 都属此类。
+      真标题的编号后面是汉字标题文字，不会紧贴 ASCII 字母。
+    - 紧跟汉字但命中中文计量单位 → 正文。``2.3万元``、``3.5倍`` 属于此类。
+    - 其余汉字开头 → 标题候选，交给后续编号链判断。``9.3设计依据`` 才是真标题。
+
+    编号后本来就有空白的（``10 电气``、``9.3 设计依据``）一律不在此处理。
+    """
+    if gap:
+        return False
+    if not rest:
+        return True
+    first = rest[0]
+    if not ("\u4e00" <= first <= "\u9fff"):
+        return True
+    return any(rest.startswith(word) for word in _unit_prefixes())
+
+
+@lru_cache(maxsize=1)
+def _unit_prefixes() -> tuple[str, ...]:
+    """中文计量单位前缀。只收"几乎不可能是标题开头"的，避免误伤真标题。
+
+    刻意不收「元」「年」「月」「日」「天」这类单字：``1.1年度计划``、``1.1元素分析``
+    都是合法标题开头，收进来会把真标题当正文。
+    """
+    words = layout_rules()["headings"].get("unit_prefixes")
+    if words:
+        return tuple(str(item) for item in words)
+    return (
+        "万元",
+        "亿元",
+        "千米",
+        "公里",
+        "毫米",
+        "厘米",
+        "平方米",
+        "立方米",
+        "千瓦",
+        "千伏",
+        "兆帕",
+        "千克",
+        "公斤",
+        "小时",
+        "分钟",
+        "倍",
+        "吨",
+        "米",
+    )
+
+
 @dataclass
 class HeadingReport:
     """标题识别结果。"""
@@ -119,6 +181,12 @@ class HeadingReport:
     notes: list[str] = field(default_factory=list)
     # 校验明细：(段落序号, 文本) / (段落序号, 前一号, 当前号, 文本) / (段落序号, 编号, 文本)
     glued: list[tuple[int, str, str]] = field(default_factory=list)
+    # 编号与标题之间不是单个半角空格：(段落序号, 编号, 实际空白字符数, 文本)
+    spacing: list[tuple[int, str, int, str]] = field(default_factory=list)
+    # 每个已识别标题的 (级别, 标题文字起始列 = 编号长度 + 空白长度)。
+    # 用来判断多空格是「有意对齐」还是「真的不一致」：项目文档常把
+    # "1  总论" 和 "11 机械化设备" 都写成文字起始于第 4 列，这是排版手法而非错误。
+    widths: list[tuple[int, int]] = field(default_factory=list)
     malformed: list[tuple[int, str]] = field(default_factory=list)
     missing_number: list[tuple[int, str]] = field(default_factory=list)
     jumps: list[tuple[int, str, str, str]] = field(default_factory=list)
@@ -221,7 +289,26 @@ class HeadingProcessor:
                 continue
 
             number = match.group(1)
+            gap = match.group(2)
+            rest = match.group(3)
             level = number.count(".") + 1
+
+            # 未套标题样式时，编号紧贴字母/符号的一律当正文。
+            # 否则 "10kV电压引自…" 会被读成一级标题 10，还会把编号链带偏，
+            # 让后面真正的 "9.4 xxx" 被判成跳号而降级。作者自己套了标题样式的不动。
+            if not prestyled and _looks_like_numbered_value(gap, rest):
+                report.notes.append(f"数字开头的正文，跳过: {text[:30]}")
+                continue
+
+            # 真标题不会这么长；超长的当正文，避免整段说明被收进目录。
+            if not prestyled and len(text) > candidate_max:
+                report.notes.append(f"段落过长，按正文处理: {text[:30]}")
+                continue
+
+            # 以句号/分号收尾的是一句话，不是标题标题。
+            if not prestyled and text.rstrip().endswith(_PROSE_TAIL):
+                report.notes.append(f"以标点收尾的句子，按正文处理: {text[:30]}")
+                continue
 
             if prev_number is None and not prestyled:
                 # 第一个标题要从 1 起。目录与正文之间的列表项（如 "17 附图"）
@@ -250,8 +337,14 @@ class HeadingProcessor:
             self._clear_direct_paragraph_layout(paragraph)
             report.detected += 1
             report.levels[level] = report.levels.get(level, 0) + 1
-            if not _STRICT_HEADING_PATTERN.match(text):
+            report.widths.append((level, len(number) + len(gap)))
+            # 规范写法是编号后跟**一个**半角空格。缺空格和多空格分开报，
+            # 提示话术不同：一个要补，一个要收。多空格是否真的算错，
+            # 交给校验层看同级别是否对齐（见 HeadingReport.widths）。
+            if not gap:
                 report.glued.append((index + 1, number, text))
+            elif gap != " ":
+                report.spacing.append((index + 1, number, len(gap), text))
             prev_number = number
             prev_prestyled = prestyled
 

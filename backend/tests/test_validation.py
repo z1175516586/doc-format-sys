@@ -6,11 +6,12 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_BREAK
+import pytest
 
 from app.domain.ooxml.conformance import DocumentValidator
 from app.domain.ooxml.cover import CoverMetadataExtractor
 from app.domain.ooxml.headings import HeadingProcessor
-from app.domain.ooxml.package import DocxPackage
+from app.domain.ooxml.package import DocxPackage, paragraph_text
 
 _ISSUER = "鞍钢集团工程技术有限公司"
 
@@ -46,6 +47,16 @@ def _heading_doc(path: Path, items: list[tuple[str, int]]) -> Path:
     doc.add_paragraph("目      录")
     for text, level in items:
         doc.add_heading(text, level=level)
+    doc.save(path)
+    return path
+
+
+def _plain_doc(path: Path, texts: list[str]) -> Path:
+    """只用普通段落，模拟"作者没套标题样式、完全靠编号识别"的文档。"""
+    doc = Document()
+    doc.add_paragraph("目      录")
+    for text in texts:
+        doc.add_paragraph(text)
     doc.save(path)
     return path
 
@@ -150,6 +161,114 @@ def test_heading_glued_number_is_warning(tmp_path: Path) -> None:
     glued = [item for item in issues if item.code == "heading_number_glued"]
     assert glued and glued[0].severity == "warning"
     assert "1.1" in glued[0].message
+
+
+def test_heading_extra_spaces_is_warning(tmp_path: Path) -> None:
+    """同级别对齐被打乱时提示多空格，且不改内容。"""
+    doc = _heading_doc(
+        tmp_path / "h.docx",
+        [("1 概述", 1), ("1.1 设计依据", 2), ("1.2  建设规模", 2)],
+    )
+    issues = _heading_issues(doc)
+    spacing = [item for item in issues if item.code == "heading_number_spacing"]
+    assert spacing and spacing[0].severity == "warning"
+    assert "2 个空白" in spacing[0].message
+
+    with DocxPackage.open(doc) as pkg:
+        texts = [paragraph_text(paragraph) for paragraph in pkg.paragraphs()]
+    assert "1.2  建设规模" in texts, "提示归提示，原文不得被改动"
+
+
+def test_heading_extra_spaces_used_for_alignment_is_silent(tmp_path: Path) -> None:
+    """单位数与两位数编号用不同空格数对齐，属有意排版，不该报。
+
+    真实文档就是这么写的：``1  总论``（1+2 空格）与 ``11 机械化设备``（11+1 空格）
+    的标题文字都起始于第 4 列。逐条报会刷出十几条噪声。
+    """
+    doc = _heading_doc(
+        tmp_path / "h.docx",
+        [
+            ("1  总论", 1),
+            ("2  建筑", 1),
+            ("11 机械化设备", 1),
+            ("12 环境保护", 1),
+        ],
+    )
+    issues = _heading_issues(doc)
+    assert [item.code for item in issues if "spacing" in item.code] == []
+
+
+@pytest.mark.parametrize(
+    ("gap", "rest", "is_value"),
+    [
+        # 编号紧贴字母：单位/量纲，必是正文
+        ("", "kV电压", True),
+        ("", "V低压配电", True),
+        ("", "m标高设配电柜", True),
+        ("", "SCADA系统", True),
+        # 编号紧贴中文计量单位
+        ("", "万元", True),
+        ("", "倍", True),
+        ("", "吨", True),
+        # 编号紧贴汉字标题文字：真标题
+        ("", "设计依据", False),
+        ("", "项目厂址现状", False),
+        ("", "年度计划", False),  # 「年」不在单位表内，不能被误杀
+        ("", "元素分析", False),  # 「元」不在单位表内，不能被误杀
+        # 编号后有空白：不是本函数管辖范围
+        (" ", "电气", False),
+        (" ", "设计依据", False),
+    ],
+)
+def test_numbered_value_detection(gap: str, rest: str, is_value: bool) -> None:
+    """编号紧贴内容时，靠紧跟的字符区分正文与标题。"""
+    from app.domain.ooxml.headings import _looks_like_numbered_value
+
+    assert _looks_like_numbered_value(gap, rest) is is_value
+
+
+def test_numbered_prose_does_not_hijack_heading_chain(tmp_path: Path) -> None:
+    """段首 "10kV电压…" 不是标题，更不能把编号链带偏。
+
+    误判的代价不只是多一条目录项：``10kV电压`` 被读成一级标题 10 后，
+    编号链被带偏，后面真正的 ``10 电气`` 会与之"同级重复"，
+    再往后的标题还可能被判跳号而降级。
+    """
+    prose = "10kV电压引自厂区配电室，采用电缆桥架敷设至各车间。"
+    chapters = [f"{index} 第{index}章" for index in range(1, 10)]
+    doc = _plain_doc(
+        tmp_path / "h.docx",
+        chapters + ["9.1 节", "9.2 节", "9.3 节", prose, "10 电气"],
+    )
+
+    with DocxPackage.open(doc) as pkg:
+        processor = HeadingProcessor(pkg)
+        report = processor.apply_heading_styles()
+        styled = [
+            paragraph_text(paragraph)
+            for paragraph in pkg.paragraphs()
+            if processor.styles.resolver.is_heading(
+                processor.styles.paragraph_style_id(paragraph) or ""
+            )
+        ]
+
+    assert prose not in styled, "以数字开头的正文被认成了标题"
+    assert "10 电气" in styled, "真标题被正文带偏后降级了"
+    assert report.levels.get(1, 0) == 10, (
+        f"一级标题应为 1..10 共 10 处，实际 {report.levels.get(1, 0)} 处"
+    )
+
+
+def test_many_extra_spaces_are_merged_into_one_issue(tmp_path: Path) -> None:
+    """多处多余空白合并成一条，避免占满问题清单把错误挤出去。"""
+    items: list[tuple[str, int]] = [("1.1 甲", 2)]
+    items += [(f"1.{index}  第{index}节", 2) for index in range(2, 7)]
+    doc = _heading_doc(tmp_path / "h.docx", items)
+    issues = _heading_issues(doc)
+    spacing = [item for item in issues if item.code == "heading_number_spacing"]
+    assert len(spacing) == 1, f"5 处多余空白应合并成 1 条，实际 {len(spacing)} 条"
+    assert "共 5 处" in spacing[0].message
+    assert spacing[0].location == "全文"
 
 
 def test_heading_jump_is_error(tmp_path: Path) -> None:

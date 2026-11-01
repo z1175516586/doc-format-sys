@@ -48,16 +48,20 @@
   "cover": {
     "description": "封面规则已迁移至 backend/config/cover_config.json（模板与配置的单一来源）"
   },
-  "headings": {
-    "max_level": 5,
-    "style_name_template": "Heading {level}",
-    "space_before_pt": 0.0,
-    "space_after_pt": 0.0,
-    "number_separator": " ",
-    "candidate_max_chars": 60,
-    "chapter_title_max_chars": 20,
-    "description": "candidate_max_chars / chapter_title_max_chars 用于区分真标题与以数字开头的正文，避免误报跳号"
-  },
+    "headings": {
+        "max_level": 5,
+        "style_name_template": "Heading {level}",
+        "space_before_pt": 0.0,
+        "space_after_pt": 0.0,
+        "number_separator": " ",
+        "candidate_max_chars": 60,
+        "chapter_title_max_chars": 20,
+        "unit_prefixes": [
+            "万元", "亿元", "千米", "公里", "毫米", "厘米", "平方米", "立方米",
+            "千瓦", "千伏", "兆帕", "千克", "公斤", "小时", "分钟", "倍", "吨", "米"
+        ],
+        "description": "candidate_max_chars / chapter_title_max_chars 用于区分真标题与以数字开头的正文，避免误报跳号。unit_prefixes 用于识别「2.3万元」这类数值段落：编号紧贴内容且以这些词开头时按正文处理，不会认成标题。刻意不收「元」「年」「月」「日」这类单字，否则「1.1年度计划」这样的真标题会被误杀"
+    },
   "output": {
     "filename_datetime_format": "%y%m%d%H%M%S",
     "allow_chinese_suffix": true

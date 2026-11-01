@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from collections import defaultdict
 
 from app.core.constants import cover_config, validation_rules
 from app.domain.ooxml.cover import CoverMetadataExtractor
@@ -177,6 +178,21 @@ class DocumentValidator:
                 )
             )
 
+        # 多空格只在「同级别对齐被打乱」时才提示。
+        # 项目文档常把 "1  总论" 与 "11 机械化设备" 都写成文字起始于同一列，
+        # 这是有意的排版手法；逐条报会刷出十几条噪声，还把人往错误方向引。
+        widths_by_level: dict[int, set[int]] = defaultdict(set)
+        for level, width in report.widths:
+            widths_by_level[level].add(width)
+
+        misaligned = [
+            item
+            for item in report.spacing
+            if len(widths_by_level.get(item[1].count(".") + 1, ())) > 1
+        ]
+        if misaligned:
+            issues.extend(self._spacing_issues(misaligned))
+
         for ordinal, prev, curr, text in report.jumps:
             same_chapter = self._same_chapter(prev, curr)
             severity = self.heading_rules.get(
@@ -221,6 +237,44 @@ class DocumentValidator:
             return []
         # 规则被设为 off 时不进入报告，避免给出无法处理的提示
         return [item for item in issues if item.severity != "off"][: self.max_issues]
+
+    def _spacing_issues(
+        self,
+        items: list[tuple[int, str, int, str]],
+    ) -> list[ValidationIssue]:
+        """把编号后多余空白转成问题清单。
+
+        超过 3 处时合并成一条：这类问题是同一件事的批量出现，逐条列会占满
+        ``max_issues`` 名额，把真正需要逐个处理的错误挤出去。
+        """
+        severity = self.heading_rules.get("spacing_severity", "warning")
+        if len(items) <= 3:
+            return [
+                self._issue(
+                    severity,
+                    "heading_number_spacing",
+                    self.messages["heading_number_spacing"].format(
+                        text=self._clip(text), number=number, count=count
+                    ),
+                    location=f"第 {ordinal} 段",
+                    excerpt=self._clip(text),
+                )
+                for ordinal, number, count, text in items
+            ]
+
+        examples = "、".join(
+            f"「{self._clip(text)}」" for _, _, _, text in items[:3]
+        )
+        return [
+            self._issue(
+                severity,
+                "heading_number_spacing",
+                f"共 {len(items)} 处标题的编号与标题之间有多余空白，"
+                f"如 {examples} 等。规范写法是编号后只留一个半角空格。",
+                location="全文",
+                excerpt=examples,
+            )
+        ]
 
     def _clip(self, text: str) -> str:
         return text if len(text) <= self.max_excerpt else text[: self.max_excerpt] + "…"

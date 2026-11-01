@@ -15,18 +15,19 @@
     "allowed_suffixes": ["说明书", "报告"],
     "description": "封面上的文档类型必须是四种规范写法之一（可带「说明书」「报告」后缀），且要与用户选择的类型一致"
   },
-  "heading": {
-    "number_pattern": "^\\d+(?:\\.\\d+)*$",
-    "separator_pattern": "[ \\t\\u3000]+",
-    "number_like_pattern": "^[0-9０-９.．。]+",
-    "max_excerpt_chars": 40,
-    "glued_severity": "warning",
-    "invalid_severity": "error",
-    "missing_number_severity": "warning",
-    "jump_same_chapter_severity": "error",
-    "jump_cross_chapter_severity": "warning",
-    "description": "编号只能由数字和点组成，必须以数字开头结尾且数字与点交替；编号与标题之间必须有空格；同级编号不得跳号"
-  },
+    "heading": {
+        "number_pattern": "^\\d+(?:\\.\\d+)*$",
+        "separator_pattern": "[ \\t\\u3000]+",
+        "number_like_pattern": "^[0-9０-９.．。]+",
+        "max_excerpt_chars": 40,
+        "glued_severity": "warning",
+        "spacing_severity": "warning",
+        "invalid_severity": "error",
+        "missing_number_severity": "warning",
+        "jump_same_chapter_severity": "error",
+        "jump_cross_chapter_severity": "warning",
+        "description": "编号只能由数字和点组成，必须以数字开头结尾且数字与点交替；编号与标题之间必须是恰好一个半角空格（缺空格报 heading_number_glued，多空格报 heading_number_spacing，两者都只提示、不改内容）；同级编号不得跳号"
+    },
   "messages": {
     "cover_issuer_missing": "封面第一页没有找到单位名称「{issuer}」，无法定位文档类型和项目名称，请检查封面第一页。",
     "front_type_missing": "封面第一页单位名称上方没有文字，这里应写文档类型：初步设计、可行性研究、初步设计（代可研）、可行性研究（代初设）。",
@@ -37,6 +38,7 @@
     "document_type_mismatch": "封面上的文档类型是「{detected}」，与选择的「{selected}」不一致，请选择与封面一致的文档类型。",
     "heading_number_invalid": "标题「{text}」的编号不规范：编号只能由数字和点组成，必须以数字开头和结尾，数字与点必须交替出现，并与标题之间留一个空格。",
     "heading_number_glued": "标题「{text}」的编号与标题之间缺少空格，规范写法应为「{number} 标题」。",
+    "heading_number_spacing": "标题「{text}」的编号与标题之间有 {count} 个空白字符，规范写法应为「{number} 标题」（编号后只留一个半角空格）。",
     "heading_missing_number": "「{text}」被标记为标题样式，但没有可用编号，已按正文处理。",
     "heading_jump_same_chapter": "标题编号跳号：「{prev}」之后直接出现「{curr}」（{text}），转换已终止。",
     "heading_jump_cross_chapter": "标题编号不连续：「{prev}」之后出现「{curr}」（{text}），请确认是否跳号。"
