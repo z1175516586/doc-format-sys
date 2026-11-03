@@ -101,6 +101,27 @@ def is_valid_heading_order(prev_number: str, curr_number: str) -> bool:
     return True
 
 
+def _first_child_skips_numbers(prev_number: str, curr_number: str) -> bool:
+    """curr 是 prev 的第一个子级，子号却不是 1 —— 不算跳号。
+
+    两种真实情况都会出现这种形态，都不该终止转换：
+
+    1. **中间编号被正文占用**：``11.3.2.1 工艺提供的设计委托任务书及资料图；``
+       以分号收尾被判成句子，紧接着的 ``11.3.2.2`` 看上去就从 ``11.3.2`` 跳号。
+    2. **自动编号承接上一条序列**：源文档给更深层级设了 ``w:lvlRestart val=0``
+       （永不重置），子号会接着往上数——Word 里同样显示 ``11.2.3.7``，
+       因为 1~6 早在第 7 章用掉了。
+
+    只对「第一个子级」放行：prev 之下若已有同级标题，prev 本身就是那个兄弟，
+    真正的同级跳号（``11.3.2.1`` → ``11.3.2.3``）照样会被拦下来。
+    """
+    prefix = f"{prev_number}."
+    if not curr_number.startswith(prefix):
+        return False
+    rest = curr_number[len(prefix):]
+    return rest.isdigit() and int(rest) > 1
+
+
 def _balanced_brackets(text: str) -> bool:
     """右括号多于左括号即视为正文，不是标题（如 "1) 说明" 这种列表项）。"""
     extra = 0
@@ -293,11 +314,17 @@ class HeadingProcessor:
             rest = match.group(3)
             level = number.count(".") + 1
 
-            # 未套标题样式时，编号紧贴字母/符号的一律当正文。
+            # 编号紧贴字母/符号的一律当正文。
             # 否则 "10kV电压引自…" 会被读成一级标题 10，还会把编号链带偏，
-            # 让后面真正的 "9.4 xxx" 被判成跳号而降级。作者自己套了标题样式的不动。
-            if not prestyled and _looks_like_numbered_value(gap, rest):
-                report.notes.append(f"数字开头的正文，跳过: {text[:30]}")
+            # 让后面真正的 "9.4 xxx" 被判成跳号而降级。
+            if _looks_like_numbered_value(gap, rest):
+                if prestyled:
+                    # 作者自己套了标题样式：开头的数字是标题文字的一部分
+                    # （如「10kV电动机保护」），不是标题号。保留原样式不动，
+                    # Word 的目录里就是这一条，只是不参与编号链。
+                    report.notes.append(f"标题样式但开头是数值，不参与编号链: {text[:30]}")
+                else:
+                    report.notes.append(f"数字开头的正文，跳过: {text[:30]}")
                 continue
 
             # 真标题不会这么长；超长的当正文，避免整段说明被收进目录。
@@ -317,7 +344,13 @@ class HeadingProcessor:
                     continue
 
             if prev_number is not None and not is_valid_heading_order(prev_number, number):
-                if prestyled and not prev_prestyled:
+                if _first_child_skips_numbers(prev_number, number):
+                    # 缺的编号要么被按正文处理的段落占用（11.3.2.1 以分号收尾），
+                    # 要么是自动编号承接上一条序列（11.2.3.7）——都不是真跳号
+                    report.notes.append(
+                        f"编号 {prev_number} → {number} 是首个下级、子号承接上一条序列，不算跳号"
+                    )
+                elif prestyled and not prev_prestyled:
                     # 文档自带的标题样式比编号链更可信，以它重新起头
                     prev_number = None
                 else:

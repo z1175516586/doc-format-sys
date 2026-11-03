@@ -303,3 +303,84 @@ def test_body_list_item_not_reported(tmp_path: Path) -> None:
     doc.save(path)
     # 正文列表项 "1）…" 不是标题，不能被误报
     assert _heading_issues(path) == []
+
+
+# ----------------------------------------------------------------------
+# 跳号误报：被正文占用的编号 / 自动编号承接上一条序列
+# ----------------------------------------------------------------------
+def _chapters(count: int = 11) -> list[str]:
+    return [f"{index} 第{index}章" for index in range(1, count + 1)]
+
+
+def _errors(issues) -> list[str]:
+    return [item.code for item in issues if item.severity == "error"]
+
+
+def test_heading_prose_item_does_not_cause_jump(tmp_path: Path) -> None:
+    """11.3.2.1 以分号收尾被判成句子后，11.3.2.2 不该算跳号。
+
+    真实文档就是这样：编号链只记到 11.3.2，紧接着看到 11.3.2.2 就报「跳号」并终止转换，
+    但用户在 Word 里看到的编号是连续的——缺的 11.3.2.1 就在上一段。
+    """
+    doc = _plain_doc(
+        tmp_path / "h.docx",
+        _chapters()
+        + [
+            "11.3 建筑",
+            "11.3.2 设计依据",
+            "11.3.2.1 工艺提供的设计委托任务书及资料图；",
+            "11.3.2.2 国家、行业及地方现行相关设计规范、标准、规程及规定，主要包括：",
+            "11.3.2.3 厂区自然条件",
+        ],
+    )
+
+    issues = _heading_issues(doc)
+    assert _errors(issues) == [], "被正文占用的编号不该报跳号"
+
+
+def test_heading_first_child_with_continued_number_is_not_jump(tmp_path: Path) -> None:
+    """自动编号不重置深层级时，首个下级可能从 7 起（Word 里也这样），不算跳号。"""
+    doc = _plain_doc(
+        tmp_path / "h.docx",
+        _chapters()
+        + [
+            "11.2 结构",
+            "11.2.3 地质条件",
+            "11.2.3.7 地震设防裂度",
+            "11.2.3.8 主要建筑材料及施工条件",
+        ],
+    )
+
+    issues = _heading_issues(doc)
+    assert _errors(issues) == []
+
+
+def test_prestyled_numeric_title_keeps_style_and_skips_chain(tmp_path: Path) -> None:
+    """作者把「10kV电动机保护」套成标题 4：开头的数字属于标题文字，不是标题号。
+
+    Word 的目录里就有这一条，不能因为编号链读成「10」就降级成正文，
+    更不能让它把后面的 7.5.3 判成跳号。
+    """
+    doc = Document()
+    doc.add_paragraph("目      录")
+    doc.add_heading("7 电气", level=1)
+    doc.add_heading("7.5 二次部分", level=2)
+    doc.add_heading("7.5.2 继电保护配置", level=3)
+    doc.add_heading("10kV电动机保护", level=4)
+    doc.add_heading("7.5.3 电能计量", level=3)
+    path = tmp_path / "h.docx"
+    doc.save(path)
+
+    with DocxPackage.open(path) as pkg:
+        processor = HeadingProcessor(pkg)
+        report = processor.apply_heading_styles()
+        levels = {
+            paragraph_text(paragraph): processor.styles.resolver.heading_level(
+                processor.styles.paragraph_style_id(paragraph) or ""
+            )
+            for paragraph in pkg.paragraphs()
+        }
+
+    assert report.jumps == []
+    assert levels["10kV电动机保护"] == 4, "作者套的标题样式不能被降级"
+    assert levels["7.5.3 电能计量"] == 3

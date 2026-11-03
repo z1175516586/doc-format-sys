@@ -7,8 +7,22 @@
 
 改进点：
 - 原实现用正则逐个匹配 <w:p> 块，遇到嵌套段落或属性换行会漏处理；
-  这里改为 lxml 结构化遍历
+    10|  这里改为 lxml 结构化遍历
 - 计数器独立成 NumCounter 类，便于单测
+
+**还原口径以 Word 实际渲染为准**（用 Word COM 读取 ListString 逐段对照过），
+因此下面几条 Word 语义必须实现，否则还原出来的编号和用户看到的不一样：
+
+1. 编号状态挂在 **abstractNumId** 上，不是 numId。多个 numId 指向同一套抽象编号时
+   共享同一条序列。典型场景：标题样式挂 numId=1、四级标题段落挂 numId=7，
+   两者都指向 abstract 2，所以「11.2.3」下的四级标题会接着用 7.2.9 用过的 1~6，
+   显示为 11.2.3.7，而不是重新从 1 起。
+2. `w:lvlRestart` 控制重置：缺省表示上层变了就重置；`val=0` 表示**永不重置**
+   （上面的 11.2.3.7 就是靠这个继续累加的）。
+3. `w:numFmt` 决定数字形态：decimalEnclosedCircleChinese 是 ①，
+   lowerLetter / lowerRoman / chineseCounting 各有一套写法，`none` 表示不显示编号。
+4. `w:numId val=0` 表示这一段**显式取消编号**，不能再回落到样式上的编号。
+5. `w:suff` 决定编号与正文之间的分隔：`nothing` 不加分隔符，其余按配置补一个空格。
 """
 
 from __future__ import annotations
@@ -26,17 +40,105 @@ logger = get_logger(__name__)
 
 _MAX_LEVELS = 9
 
+# 编号形态的字符表。这些是 OOXML numFmt 的固定枚举，不属于可调业务配置。
+_CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+_CN_DIGITS = "零一二三四五六七八九"
+_ROMAN_UNITS = (
+    (1000, "M"),
+    (900, "CM"),
+    (500, "D"),
+    (400, "CD"),
+    (100, "C"),
+    (90, "XC"),
+    (50, "L"),
+    (40, "XL"),
+    (10, "X"),
+    (9, "IX"),
+    (5, "V"),
+    (4, "IV"),
+    (1, "I"),
+)
+_CHINESE_FMTS = frozenset(
+    {
+        "chineseCounting",
+        "chineseCountingThousand",
+        "chineseLegalSimplified",
+        "japaneseCounting",
+        "ideographDigital",
+        "taiwaneseCounting",
+        "taiwaneseCountingThousand",
+    }
+)
+_ROMAN_FMTS = frozenset({"lowerRoman", "upperRoman"})
+_LETTER_FMTS = frozenset({"lowerLetter", "upperLetter"})
+_CIRCLED_FMTS = frozenset({"decimalEnclosedCircle", "decimalEnclosedCircleChinese"})
 
-def format_number_label(number: str) -> str:
+
+def _chinese_number(value: int) -> str:
+    """1 → 一，11 → 十一，21 → 二十一。超出 99 时退回阿拉伯数字。"""
+    if value < 0 or value > 99:
+        return str(value)
+    if value < 10:
+        return _CN_DIGITS[value]
+    tens, ones = divmod(value, 10)
+    head = "十" if tens == 1 else f"{_CN_DIGITS[tens]}十"
+    return head if ones == 0 else f"{head}{_CN_DIGITS[ones]}"
+
+
+def _roman_number(value: int, upper: bool) -> str:
+    if value < 1 or value > 3999:
+        return str(value)
+    rest, result = value, []
+    for amount, symbol in _ROMAN_UNITS:
+        while rest >= amount:
+            rest -= amount
+            result.append(symbol)
+    text = "".join(result)
+    return text if upper else text.lower()
+
+
+def _letter_number(value: int, upper: bool) -> str:
+    """1 → a，26 → z，27 → aa（Word 的重复字母写法）。"""
+    if value < 1:
+        return str(value)
+    letter = chr(ord("a") + (value - 1) % 26)
+    repeats = (value - 1) // 26 + 1
+    text = letter * repeats
+    return text.upper() if upper else text
+
+
+def format_number_value(value: int, num_fmt: str) -> str:
+    """按 OOXML numFmt 把计数器数值渲染成 Word 里看到的形态。"""
+    if num_fmt in ("none", ""):
+        return ""
+    if num_fmt in _CIRCLED_FMTS:
+        if 1 <= value <= len(_CIRCLED_DIGITS):
+            return _CIRCLED_DIGITS[value - 1]
+        return str(value)
+    if num_fmt in _CHINESE_FMTS:
+        return _chinese_number(value)
+    if num_fmt in _ROMAN_FMTS:
+        return _roman_number(value, num_fmt == "upperRoman")
+    if num_fmt in _LETTER_FMTS:
+        return _letter_number(value, num_fmt == "upperLetter")
+    return str(value)
+
+
+def format_number_label(number: str, suff: str | None = None) -> str:
     """编号和后面的文字之间只留配置里的那一个分隔符。
 
     编号定义的 lvlText 经常已经带一个空格，Word 的 suff 还会再加一个。
     这里先去掉末尾空白，再只补一次分隔符，避免标题变成「1  总论」。
+
+    ``suff == "nothing"`` 表示 Word 里编号与正文紧贴（如「（1）配料室」），
+    此时不补分隔符，保持原样。
     """
-    separator = str(layout_rules()["headings"].get("number_separator", " "))
     cleaned = number.rstrip(" \t")
     if not cleaned:
         return ""
+    if suff == "nothing":
+        return cleaned
+    separator = str(layout_rules()["headings"].get("number_separator", " "))
     return f"{cleaned}{separator}"
 
 
@@ -45,26 +147,49 @@ class _LevelDef:
     start: int = 1
     num_fmt: str = "decimal"
     lvl_text: str = "%1"
+    # None 表示 w:lvlRestart 缺省（上层变化即重置），0 表示永不重置
+    lvl_restart: int | None = None
+    suff: str | None = None
 
 
 @dataclass
 class _NumCounter:
-    """按 numId 维护的多级计数器。"""
+    """按 abstractNumId 维护的多级计数器（Word 的编号状态挂在抽象编号上）。"""
 
     values: dict[str, list[int]] = field(default_factory=dict)
+    start_overrides: dict[tuple[str, int], int] = field(default_factory=dict)
 
-    def next_value(self, num_id: str, level: int, definition: _LevelDef) -> int:
-        counters = self.values.setdefault(num_id, [0] * _MAX_LEVELS)
-
-        # 重置所有更深的层级，保证 1.1 → 1.2 而非 1.1 → 1.2.1 递增
-        for deeper in range(level + 1, _MAX_LEVELS):
-            counters[deeper] = 0
+    def next_value(
+        self,
+        abstract_id: str,
+        num_id: str,
+        level: int,
+        levels: dict[int, "_LevelDef"],
+    ) -> list[int]:
+        counters = self.values.setdefault(abstract_id, [0] * _MAX_LEVELS)
+        definition = levels[level]
 
         if counters[level] == 0:
-            counters[level] = definition.start
+            override = self.start_overrides.get((num_id, level))
+            counters[level] = override if override is not None else definition.start
         else:
             counters[level] += 1
-        return counters[level]
+
+        self._reset_deeper(counters, levels, level)
+        return counters
+
+    @staticmethod
+    def _reset_deeper(counters: list[int], levels: dict[int, "_LevelDef"], level: int) -> None:
+        """上层编号变化时重置更深的层级，规则由 w:lvlRestart 决定。"""
+        for deeper in range(level + 1, _MAX_LEVELS):
+            definition = levels.get(deeper)
+            restart = definition.lvl_restart if definition is not None else None
+            if restart == 0:
+                continue
+            # 缺省：出现更浅的层级就重置；显式 val=N：0 基层级 < N 时重置
+            limit = restart if restart is not None else deeper
+            if level < limit:
+                counters[deeper] = 0
 
 
 class NumberingProcessor:
@@ -107,8 +232,24 @@ class NumberingProcessor:
         for num in root.findall(qn("w:num")):
             num_id = num.get(w_attr("numId"))
             ref = num.find(qn("w:abstractNumId"))
-            if num_id and ref is not None:
-                self._num_to_abstract[num_id] = ref.get(w_attr("val")) or ""
+            if not num_id or ref is None:
+                continue
+            self._num_to_abstract[num_id] = ref.get(w_attr("val")) or ""
+            # w:lvlOverride/w:startOverride：这一套编号从指定值重新开始
+            for override in num.findall(qn("w:lvlOverride")):
+                try:
+                    level = int(override.get(w_attr("ilvl")) or 0)
+                except ValueError:
+                    continue
+                start = override.find(qn("w:startOverride"))
+                if start is None:
+                    continue
+                try:
+                    self._counter.start_overrides[(num_id, level)] = int(
+                        start.get(w_attr("val")) or ""
+                    )
+                except ValueError:
+                    continue
 
     def _parse_style_numbering(self) -> None:
         """有些文档把编号定义挂在样式上（如标题 1 → 自动编号），段落本身没有 numPr。"""
@@ -158,6 +299,8 @@ class NumberingProcessor:
         start_el = lvl.find(qn("w:start"))
         fmt_el = lvl.find(qn("w:numFmt"))
         text_el = lvl.find(qn("w:lvlText"))
+        restart_el = lvl.find(qn("w:lvlRestart"))
+        suff_el = lvl.find(qn("w:suff"))
 
         start = 1
         if start_el is not None:
@@ -166,10 +309,19 @@ class NumberingProcessor:
             except ValueError:
                 start = 1
 
+        restart: int | None = None
+        if restart_el is not None:
+            try:
+                restart = max(0, int(restart_el.get(w_attr("val")) or 0))
+            except ValueError:
+                restart = None
+
         return _LevelDef(
             start=start,
             num_fmt=(fmt_el.get(w_attr("val")) if fmt_el is not None else None) or "decimal",
             lvl_text=(text_el.get(w_attr("val")) if text_el is not None else None) or "%1",
+            lvl_restart=restart,
+            suff=(suff_el.get(w_attr("val")) if suff_el is not None else None),
         )
 
     # ------------------------------------------------------------------
@@ -188,13 +340,14 @@ class NumberingProcessor:
         if definition is None:
             return ""
 
-        current = self._counter.next_value(num_id, level, definition)
-
         if definition.num_fmt == "bullet":
-            return format_number_label(definition.lvl_text)
+            return format_number_label(definition.lvl_text, definition.suff)
+        if definition.num_fmt == "none":
+            return ""
+
+        counters = self._counter.next_value(abstract_id, num_id, level, levels)
 
         # 补齐上级编号（如 2.1 中的 2）
-        counters = self._counter.values.setdefault(num_id, [0] * _MAX_LEVELS)
         for upper in range(level):
             if counters[upper] == 0:
                 upper_def = levels.get(upper)
@@ -203,57 +356,53 @@ class NumberingProcessor:
         text = definition.lvl_text
         for index in range(1, _MAX_LEVELS + 1):
             placeholder = f"%{index}"
-            if placeholder in text:
-                text = text.replace(placeholder, str(counters[index - 1]))
-        return format_number_label(text)
+            if placeholder not in text:
+                continue
+            upper_def = levels.get(index - 1)
+            fmt = upper_def.num_fmt if upper_def is not None else "decimal"
+            text = text.replace(
+                placeholder, format_number_value(counters[index - 1], fmt)
+            )
+        return format_number_label(text, definition.suff)
 
     def convert(self) -> int:
         """把正文段落中的自动编号转成文本，返回转换段落数。
 
         编号可能直接写在段落上，也可能来自段落所用的样式（标题样式常见）。
         样式提供的编号要把样式上的 numPr 一并摘掉，否则会重复编号。
+
+        必须**按文档顺序单次遍历**：计数器依赖先后顺序，分两趟走（先段落级、
+        再样式级）会把编号序列算乱。
         """
         if not self._num_to_abstract:
             return 0
 
-        converted = self._convert_direct()
-        converted += self._convert_from_styles()
+        converted = self._walk()
         self._strip_style_numbering()
 
         if converted:
             logger.info("自动编号转文本 %d 段", converted)
         return converted
 
-    def _convert_direct(self) -> int:
-        """段落自己带 numPr 的情况。"""
-        converted = 0
-        for paragraph in self.pkg.paragraphs():
-            ppr = paragraph.find(qn("w:pPr"))
-            if ppr is None:
-                continue
-            num_pr = ppr.find(qn("w:numPr"))
-            if num_pr is None:
-                continue
-
-            number_text = self._number_for_numpr(num_pr)
-            ppr.remove(num_pr)
-            if number_text:
-                self._prepend_text_run(paragraph, number_text)
-            converted += 1
-        return converted
-
-    def _convert_from_styles(self) -> int:
-        """编号来自段落样式的情况，按文档顺序补编号。"""
-        if not self._style_numpr:
-            return 0
-
+    def _walk(self) -> int:
         converted = 0
         for paragraph in self.pkg.body.iter(qn("w:p")):
             ppr = paragraph.find(qn("w:pPr"))
             if ppr is None:
                 continue
-            if ppr.find(qn("w:numPr")) is not None:
+
+            num_pr = ppr.find(qn("w:numPr"))
+            if num_pr is not None:
+                num_id, level = self._numpr_values(num_pr)
+                ppr.remove(num_pr)
+                # numId=0 是显式取消编号，不能回落到样式上的编号
+                if num_id and num_id != "0":
+                    number_text = self.build_number_text(num_id, level)
+                    if number_text:
+                        self._prepend_text_run(paragraph, number_text)
+                        converted += 1
                 continue
+
             style_el = ppr.find(qn("w:pStyle"))
             if style_el is None:
                 continue
@@ -287,17 +436,17 @@ class NumberingProcessor:
             if num_pr is not None:
                 ppr.remove(num_pr)
 
-    def _number_for_numpr(self, num_pr: etree._Element) -> str:
+    @staticmethod
+    def _numpr_values(num_pr: etree._Element) -> tuple[str, int]:
+        """取出 numPr 上的 numId 与 ilvl。"""
         num_id_el = num_pr.find(qn("w:numId"))
         ilvl_el = num_pr.find(qn("w:ilvl"))
-        if num_id_el is None:
-            return ""
-        num_id = num_id_el.get(w_attr("val")) or ""
+        num_id = num_id_el.get(w_attr("val")) or "" if num_id_el is not None else ""
         try:
             level = int(ilvl_el.get(w_attr("val")) or 0) if ilvl_el is not None else 0
         except ValueError:
             level = 0
-        return self.build_number_text(num_id, level)
+        return num_id, level
 
     @staticmethod
     def _strip_leading_gap(paragraph: etree._Element) -> None:
