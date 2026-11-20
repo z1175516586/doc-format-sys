@@ -529,3 +529,11 @@ def test_front_cover_header_footer_cleared(sample_docx: Path) -> None:
         assert "".join(item.text or "" for item in blank.iter(qn("w:t"))) == ""
         bottoms = list(blank.iter(qn("w:bottom")))
         assert bottoms and bottoms[0].get(qn("w:val")) == "nil"
+
+        for part in ("word/header_blank.xml", "word/footer_blank.xml"):
+            ppr = pkg.xml(part).find(f"./{qn('w:p')}/{qn('w:pPr')}")
+            spacing = ppr.find(qn("w:spacing"))
+            assert spacing.get(qn("w:lineRule")) == "exact"
+            assert spacing.get(qn("w:line")) == "20"
+            assert spacing.get(qn("w:before")) == spacing.get(qn("w:after")) == "0"
+            assert ppr.find(qn("w:snapToGrid")).get(qn("w:val")) == "0"

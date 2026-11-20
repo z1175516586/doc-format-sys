@@ -45,6 +45,31 @@ def test_pipeline_succeeds(sample_docx: Path, tmp_path: Path) -> None:
     ]
 
 
+def test_cover_keeps_blank_subtitle_line_on_both_pages(sample_docx: Path, tmp_path: Path) -> None:
+    from app.core.config import get_settings
+
+    success, output, result = _run(sample_docx, tmp_path / "out.docx", use_cover_template=True)
+    assert success, result.message
+
+    with (
+        DocxPackage.open(get_settings().resources_dir / "cover_template.docx") as template,
+        DocxPackage.open(output) as converted,
+    ):
+        original = [p for p in template.paragraphs() if paragraph_text(p) == "（代可研）"]
+        blank = [
+            p.getnext() for p in converted.paragraphs() if paragraph_text(p) == "初步设计"
+        ]
+        assert len(original) == len(blank) == 2
+        for source, target in zip(original, blank, strict=True):
+            assert target.tag == qn("w:p")
+            assert paragraph_text(target) == ""
+            size = "./w:pPr/w:rPr/w:sz/@w:val"
+            assert target.xpath(size, namespaces=NSMAP) == source.xpath(size, namespaces=NSMAP)
+            assert target.xpath("./w:pPr/w:pStyle/@w:val", namespaces=NSMAP) == source.xpath(
+                "./w:pPr/w:pStyle/@w:val", namespaces=NSMAP
+            )
+
+
 def test_cross_chapter_jump_blocks_conversion_even_with_many_warnings(
     sample_docx: Path, tmp_path: Path
 ) -> None:

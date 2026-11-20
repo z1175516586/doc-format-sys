@@ -764,7 +764,7 @@ class TemplateService:
 
 
 def _blank_header_footer(root_tag: str) -> bytes:
-    """空白页眉/页脚。不用 Header/Footer 样式，四边框显式取消，避免样式横线。"""
+    """生成不撑开封面版心的空白页眉页脚。"""
     root = etree.Element(qn(root_tag), nsmap={"w": NSMAP["w"]})
     paragraph = etree.SubElement(root, qn("w:p"))
     ppr = etree.SubElement(paragraph, qn("w:pPr"))
@@ -772,6 +772,22 @@ def _blank_header_footer(root_tag: str) -> bytes:
     for edge in ("top", "left", "bottom", "right"):
         border = etree.SubElement(borders, qn(f"w:{edge}"))
         border.set(w_attr("val"), "nil")
+    # 避免继承正文固定行高或文档网格，将段落锚定的封面 Logo 挤离模板位置。
+    etree.SubElement(ppr, qn("w:snapToGrid"), {w_attr("val"): "0"})
+    etree.SubElement(
+        ppr,
+        qn("w:spacing"),
+        {
+            w_attr("before"): "0",
+            w_attr("beforeLines"): "0",
+            w_attr("beforeAutospacing"): "0",
+            w_attr("after"): "0",
+            w_attr("afterLines"): "0",
+            w_attr("afterAutospacing"): "0",
+            w_attr("line"): "20",
+            w_attr("lineRule"): "exact",
+        },
+    )
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 

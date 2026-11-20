@@ -482,24 +482,20 @@ class CoverProcessor:
     def apply_stage(self, primary: str, secondary: str) -> dict[str, int]:
         """设置阶段文字（初步设计 / 可行性研究 及可选的 （代可研）/（代初设））。
 
-        阶段主/副文字在模板里是独立段落；副文字为空（文档类型 1/2）时整段删除。
+        阶段主副标题各占一个模板段落。没有副标题时，保留第二行及其段落格式。
         """
         replaced = 0
-        removed = 0
-        for paragraph in list(self.pkg.paragraphs()):
+        cleared = 0
+        for paragraph in self.pkg.paragraphs():
             text = _compact(paragraph_text(paragraph))
             if text in self.stage_primary:
                 self._set_paragraph_text(paragraph, primary)
                 replaced += 1
             elif text in self.stage_secondary:
-                if secondary:
-                    self._set_paragraph_text(paragraph, secondary)
-                else:
-                    parent = paragraph.getparent()
-                    if parent is not None:
-                        parent.remove(paragraph)
-                        removed += 1
-        return {"stage_primary": replaced, "stage_secondary_removed": removed}
+                self._set_paragraph_text(paragraph, secondary)
+                if not secondary:
+                    cleared += 1
+        return {"stage_primary": replaced, "stage_secondary_cleared": cleared}
 
     def replace_fields(self, mapping: dict[str, str]) -> int:
         """回填项目名/日期/库号等字段，保留 run 字体格式。
