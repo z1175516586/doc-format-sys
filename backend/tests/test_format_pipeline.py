@@ -45,6 +45,28 @@ def test_pipeline_succeeds(sample_docx: Path, tmp_path: Path) -> None:
     ]
 
 
+def test_cross_chapter_jump_blocks_conversion_even_with_many_warnings(
+    sample_docx: Path, tmp_path: Path
+) -> None:
+    from docx import Document
+
+    doc = Document(sample_docx)
+    for number in range(2, 22):
+        doc.add_paragraph(f"1.{number}项目说明")
+    doc.add_heading("2.2 编制依据", level=2)
+    doc.save(sample_docx)
+
+    success, output, result = _run(sample_docx, tmp_path / "out.docx")
+
+    assert not success
+    assert not output.exists()
+    assert result.steps[-1].name == "conformance"
+    assert any(
+        issue["code"] == "heading_jump_cross_chapter" and issue["severity"] == "error"
+        for issue in result.issues
+    )
+
+
 def test_toc_field_inserted(sample_docx: Path, tmp_path: Path) -> None:
     success, output, _ = _run(sample_docx, tmp_path / "out.docx", insert_toc=True)
     assert success

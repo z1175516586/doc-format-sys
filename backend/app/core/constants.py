@@ -191,7 +191,7 @@ DEFAULT_VALIDATION_RULES: dict[str, Any] = {
         "invalid_severity": "error",
         "missing_number_severity": "warning",
         "jump_same_chapter_severity": "error",
-        "jump_cross_chapter_severity": "warning",
+        "jump_cross_chapter_severity": "error",
     },
     "messages": {
         "cover_issuer_missing": "封面第一页没有找到单位名称「{issuer}」，无法定位文档类型和项目名称，请检查封面第一页。",
@@ -206,7 +206,7 @@ DEFAULT_VALIDATION_RULES: dict[str, Any] = {
         "heading_number_spacing": "标题「{text}」的编号与标题之间有 {count} 个空白字符，规范写法应为「{number} 标题」（编号后只留一个半角空格）。",
         "heading_missing_number": "「{text}」被标记为标题样式，但没有可用编号，已按正文处理。",
         "heading_jump_same_chapter": "标题编号跳号：「{prev}」之后直接出现「{curr}」（{text}），转换已终止。",
-        "heading_jump_cross_chapter": "标题编号不连续：「{prev}」之后出现「{curr}」（{text}），请确认是否跳号。",
+        "heading_jump_cross_chapter": "标题编号跨章不连续：「{prev}」之后出现「{curr}」（{text}），转换已终止。",
     },
 }
 

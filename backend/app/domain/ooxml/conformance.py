@@ -235,8 +235,11 @@ class DocumentValidator:
     def _finish(self, issues: list[ValidationIssue]) -> list[ValidationIssue]:
         if not self.rules.get("enabled", True):
             return []
-        # 规则被设为 off 时不进入报告，避免给出无法处理的提示
-        return [item for item in issues if item.severity != "off"][: self.max_issues]
+        visible = [item for item in issues if item.severity != "off"]
+        if len(visible) > self.max_issues:
+            # 超出展示上限时优先保留阻断错误，避免警告挤掉错误后仍交付文档。
+            visible.sort(key=lambda item: item.severity != "error")
+        return visible[: self.max_issues]
 
     def _spacing_issues(
         self,

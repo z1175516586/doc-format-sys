@@ -76,15 +76,17 @@ def _direct_outline_level(paragraph: etree._Element) -> int | None:
 def is_valid_heading_order(prev_number: str, curr_number: str) -> bool:
     """判断标题编号顺序是否合法。
 
-    规则（与原实现一致）：
-    - 同级或深层递增只能 +1，不能跳级（1 → 3 非法）
-    - 上位级别递增时，后续各级必须归零（1.9 → 2.0 合法，1.9 → 2.1 非法）
+    跨章只能接下一章的一级标题，例如 9.2 → 10。
+    同章按第一个不同的编号分量判断是否连续递增。
     """
     try:
         prev = [int(x) for x in prev_number.split(".")]
         curr = [int(x) for x in curr_number.split(".")]
     except ValueError:
         return False
+
+    if prev[0] != curr[0]:
+        return curr == [prev[0] + 1]
 
     max_len = max(len(prev), len(curr))
     prev += [0] * (max_len - len(prev))
@@ -350,8 +352,12 @@ class HeadingProcessor:
                     report.notes.append(
                         f"编号 {prev_number} → {number} 是首个下级、子号承接上一条序列，不算跳号"
                     )
-                elif prestyled and not prev_prestyled:
-                    # 文档自带的标题样式比编号链更可信，以它重新起头
+                elif (
+                    prestyled
+                    and not prev_prestyled
+                    and prev_number.partition(".")[0] == number.partition(".")[0]
+                ):
+                    # 同章可按原有标题样式重新起头，跨章仍须校验顺序
                     prev_number = None
                 else:
                     report.invalid_order.append(f"{number} (前 {prev_number})")

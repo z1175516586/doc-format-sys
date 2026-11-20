@@ -25,7 +25,7 @@
         "invalid_severity": "error",
         "missing_number_severity": "warning",
         "jump_same_chapter_severity": "error",
-        "jump_cross_chapter_severity": "warning",
+        "jump_cross_chapter_severity": "error",
         "description": "编号只能由数字和点组成，必须以数字开头结尾且数字与点交替；编号与标题之间必须是恰好一个半角空格（缺空格报 heading_number_glued，多空格报 heading_number_spacing，两者都只提示、不改内容）；同级编号不得跳号"
     },
   "messages": {
@@ -41,6 +41,6 @@
     "heading_number_spacing": "标题「{text}」的编号与标题之间有 {count} 个空白字符，规范写法应为「{number} 标题」（编号后只留一个半角空格）。",
     "heading_missing_number": "「{text}」被标记为标题样式，但没有可用编号，已按正文处理。",
     "heading_jump_same_chapter": "标题编号跳号：「{prev}」之后直接出现「{curr}」（{text}），转换已终止。",
-    "heading_jump_cross_chapter": "标题编号不连续：「{prev}」之后出现「{curr}」（{text}），请确认是否跳号。"
+    "heading_jump_cross_chapter": "标题编号跨章不连续：「{prev}」之后出现「{curr}」（{text}），转换已终止。"
   }
 }

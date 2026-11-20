@@ -286,11 +286,33 @@ def test_heading_malformed_number_is_error(tmp_path: Path) -> None:
     assert [item.code for item in errors] == ["heading_number_invalid"]
 
 
-def test_cross_chapter_jump_is_warning(tmp_path: Path) -> None:
+def test_cross_chapter_jump_is_error(tmp_path: Path) -> None:
     doc = _heading_doc(tmp_path / "h.docx", [("1 概述", 1), ("3 系统方案", 1)])
     issues = _heading_issues(doc)
     assert [item.code for item in issues] == ["heading_jump_cross_chapter"]
-    assert issues[0].severity == "warning"
+    assert issues[0].severity == "error"
+
+
+@pytest.mark.parametrize(
+    "number", ["3.3", "10.1", "10.2", "11", "10.1.1"]
+)
+def test_cross_chapter_requires_next_chapter_heading(tmp_path: Path, number: str) -> None:
+    doc = _heading_doc(
+        tmp_path / "h.docx", [("9.2 项目概况", 2), (f"{number} 编制依据", number.count(".") + 1)]
+    )
+    issues = _heading_issues(doc)
+    assert [item.code for item in issues if item.severity == "error"] == [
+        "heading_jump_cross_chapter"
+    ]
+
+
+@pytest.mark.parametrize("number", ["9.2", "9.2.1", "9.2.1.1"])
+def test_cross_chapter_accepts_next_chapter_then_its_sections(tmp_path: Path, number: str) -> None:
+    doc = _heading_doc(
+        tmp_path / "h.docx",
+        [(f"{number} 项目概况", number.count(".") + 1), ("10 电气", 1), ("10.1 配电", 2)],
+    )
+    assert _heading_issues(doc) == []
 
 
 def test_body_list_item_not_reported(tmp_path: Path) -> None:
