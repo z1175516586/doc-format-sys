@@ -26,6 +26,7 @@ from app.core.errors import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.namespaces import NSMAP, qn, w_attr
 from app.domain.ooxml.package import DocxPackage, paragraph_text
+from app.domain.ooxml.sections import SectionProcessor
 
 logger = get_logger(__name__)
 
@@ -33,6 +34,8 @@ _META_FILENAME = "_meta.json"
 _SLUG_PATTERN = re.compile(r"[^a-zA-Z0-9_-]+")
 
 _HF_PREFIXES = ("word/header", "word/footer")
+_FOOTER_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer"
+_FOOTER_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
 
 
 class TemplateService:
@@ -310,7 +313,7 @@ class TemplateService:
         return filled
 
     def polish_header_footer(self, target: DocxPackage, cover_sections: int) -> None:
-        """校正页眉页脚：封面首页空白、正文左右对齐、页脚横线贯通。
+        """校正页眉页脚，保留封面留白和正文页脚横线，居中横版页码。
 
         排版引擎刷新域时会把右对齐定位符改成普通制表符，页脚文本框的环绕也会
         把上划线截短。保存后和引擎刷新后都要再跑一遍。
@@ -319,6 +322,7 @@ class TemplateService:
         self._clear_front_header_footer(target, plain_from)
         self._restore_header_alignment(target)
         self._unwrap_footer_shapes(target)
+        self._center_landscape_page_numbers(target)
 
     @staticmethod
     def _plain_section_start(cover_sections: int) -> int:
@@ -404,6 +408,86 @@ class TemplateService:
                 continue
             _release_footer_shapes(root)
 
+    def _center_landscape_page_numbers(self, target: DocxPackage) -> None:
+        """按节定位页脚。横竖版共用带页码的页脚时，为横版创建独立部件。"""
+        rels_name = "word/_rels/document.xml.rels"
+        if not target.has(rels_name):
+            return
+        part_by_id = {
+            rel.get("Id"): posixpath.normpath(
+                name.lstrip("/") if name.startswith("/") else posixpath.join("word", name)
+            )
+            for rel in target.xml(rels_name).findall(qn("pr:Relationship"))
+            if rel.get("Type") == _FOOTER_REL_TYPE and (name := rel.get("Target"))
+        }
+
+        inherited: dict[str, str] = {}
+        references = []
+        landscape_parts: set[str] = set()
+        other_parts: set[str] = set()
+        for section, info in zip(target.section_properties(), SectionProcessor(target).describe(), strict=True):
+            explicit = {
+                ref.get(w_attr("type"), "default"): ref
+                for ref in section.findall(qn("w:footerReference"))
+            }
+            inherited.update({kind: ref.get(qn("r:id"), "") for kind, ref in explicit.items()})
+            references.append((section, info.is_landscape, explicit, inherited.copy()))
+            parts = landscape_parts if info.is_landscape else other_parts
+            parts.update(part_by_id[rid] for rid in inherited.values() if rid in part_by_id)
+
+        replacements: dict[str, str] = {}
+        for part in sorted(landscape_parts):
+            if not target.has(part):
+                continue
+            root = target.xml(part)
+            if part not in other_parts:
+                _center_page_number_shapes(root)
+                continue
+
+            # 使用单独部件，既保留竖版样式，也保留横版页脚里的公司名称和横线。
+            copy = etree.fromstring(etree.tostring(root))
+            if not _center_page_number_shapes(copy):
+                continue
+            directory, name = posixpath.split(part)
+            centered_name = self._unused_landscape_footer_name(target, directory, name)
+            target.add_part(centered_name, etree.tostring(copy))
+            source_rels = posixpath.join(directory, "_rels", f"{name}.rels")
+            if target.has(source_rels):
+                centered_rels = posixpath.join(directory, "_rels", f"{posixpath.basename(centered_name)}.rels")
+                target.add_part(centered_rels, target.read(source_rels))
+            replacements[part] = self._ensure_part_relationship(
+                target, centered_name, _FOOTER_REL_TYPE, "rIdLandscapeFooter", _FOOTER_CONTENT_TYPE
+            )
+
+        if not replacements:
+            return
+        written: dict[str, str] = {}
+        for section, landscape, explicit, effective in references:
+            for kind, original_id in effective.items():
+                part = part_by_id.get(original_id, "")
+                desired_id = replacements.get(part, original_id) if landscape else original_id
+                ref = explicit.get(kind)
+                if ref is not None:
+                    if desired_id != original_id:
+                        ref.set(qn("r:id"), desired_id)
+                elif desired_id != written.get(kind):
+                    # 分节之间可能继承页脚，切换方向时显式恢复应使用的页脚。
+                    ref_element = etree.Element(qn("w:footerReference"))
+                    ref_element.set(w_attr("type"), kind)
+                    ref_element.set(qn("r:id"), desired_id)
+                    section.insert(0, ref_element)
+                written[kind] = desired_id
+
+    @staticmethod
+    def _unused_landscape_footer_name(target: DocxPackage, directory: str, name: str) -> str:
+        stem, extension = posixpath.splitext(name)
+        candidate = posixpath.join(directory, f"footer_landscape_{stem}{extension}")
+        suffix = 1
+        while target.has(candidate):
+            candidate = posixpath.join(directory, f"footer_landscape_{stem}_{suffix}{extension}")
+            suffix += 1
+        return candidate
+
     def _ensure_header_relationship(self, target: DocxPackage, part_name: str) -> str:
         return self._ensure_part_relationship(
             target,
@@ -424,6 +508,8 @@ class TemplateService:
         rels_name = "word/_rels/document.xml.rels"
         rels = target.xml(rels_name)
         target_rel = posixpath.relpath(part_name, "word")
+        # 二次转换可能先从源文件迁入同名部件。复用关系时也要校正部件类型。
+        target.ensure_content_type_override(part_name, content_type)
         for rel in rels.findall(qn("pr:Relationship")):
             if rel.get("Target") == target_rel and rel.get("Type") == rel_type:
                 return rel.get("Id") or ""
@@ -435,19 +521,7 @@ class TemplateService:
             suffix += 1
             rel_id = f"{rel_id_base}{suffix}"
         self._append_rel(rels, rel_id, rel_type, target_rel, False)
-        self._ensure_override_content_type(target, part_name, content_type)
         return rel_id
-
-    @staticmethod
-    def _ensure_override_content_type(target: DocxPackage, part_name: str, content_type: str) -> None:
-        content_types = target.xml("[Content_Types].xml")
-        part = "/" + part_name
-        for override in content_types.findall(qn("ct:Override")):
-            if override.get("PartName") == part:
-                return
-        node = etree.SubElement(content_types, qn("ct:Override"))
-        node.set("PartName", part)
-        node.set("ContentType", content_type)
 
     @staticmethod
     def _toc_section_index(pkg: DocxPackage) -> int:
@@ -842,6 +916,43 @@ _WRAPPING_TAGS = (
 )
 # 模板页脚用的是 VML 环绕（w10:wrap），引擎刷新后会变成 wp:wrapSquare。两种都要放开。
 _W10_NS = "urn:schemas-microsoft-com:office:word"
+
+
+def _has_page_field(element: etree._Element) -> bool:
+    instructions = [node.text or "" for node in element.iter(qn("w:instrText"))]
+    instructions.extend(node.get(w_attr("instr"), "") for node in element.iter(qn("w:fldSimple")))
+    return any(re.match(r"^\s*PAGE(?:\s|$)", text, re.IGNORECASE) for text in instructions)
+
+
+def _center_page_number_shapes(root: etree._Element) -> bool:
+    """保留页码框的垂直位置，以整页为基准水平居中。"""
+    changed = False
+    for anchor in root.iter(qn("wp:anchor")):
+        position = anchor.find(qn("wp:positionH"))
+        if position is None or not _has_page_field(anchor):
+            continue
+        position.set("relativeFrom", "page")
+        for child in list(position):
+            position.remove(child)
+        etree.SubElement(position, qn("wp:align")).text = "center"
+        changed = True
+
+    for shape in root.iter(qn("v:shape")):
+        if not _has_page_field(shape):
+            continue
+        style = {
+            key.strip().lower(): value.strip()
+            for item in (shape.get("style") or "").split(";")
+            if ":" in item
+            for key, value in [item.split(":", 1)]
+        }
+        style.pop("left", None)
+        style.pop("margin-left", None)
+        style["mso-position-horizontal"] = "center"
+        style["mso-position-horizontal-relative"] = "page"
+        shape.set("style", ";".join(f"{key}:{value}" for key, value in style.items()))
+        changed = True
+    return changed
 
 
 def _release_footer_shapes(root: etree._Element) -> None:

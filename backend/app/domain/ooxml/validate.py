@@ -10,14 +10,24 @@
 3. 所有内部关系目标部件真实存在
 4. 正文至少有一个节属性
 5. 无悬空样式引用（引用了 styles.xml 中不存在的 pStyle）
+6. 分节引用的页眉、页脚部件具有正确的内容类型
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from posixpath import join, normpath
 
-from app.core.namespaces import PART_DOCUMENT, PART_DOCUMENT_RELS, PART_STYLES, R, qn
+from app.core.namespaces import (
+    HEADER_FOOTER_CONTENT_TYPES,
+    PART_CONTENT_TYPES,
+    PART_DOCUMENT,
+    PART_DOCUMENT_RELS,
+    PART_STYLES,
+    R,
+    qn,
+)
 from app.domain.ooxml.package import DocxPackage
 
 _REL_ATTRS = (
@@ -100,6 +110,40 @@ class StructuralValidator:
 
         report.stats["relationships"] = len(known)
         report.stats["unresolved_targets"] = len(unresolved)
+        self._check_header_footer_content_types(pkg, report, known)
+
+    @staticmethod
+    def _check_header_footer_content_types(
+        pkg: DocxPackage, report: ValidationReport, known: dict[str, str]
+    ) -> None:
+        if not pkg.has(PART_CONTENT_TYPES):
+            report.add_error("缺少 [Content_Types].xml")
+            return
+
+        root = pkg.xml(PART_CONTENT_TYPES)
+        overrides = {el.get("PartName"): el.get("ContentType") for el in root.findall(qn("ct:Override"))}
+        defaults = {
+            (el.get("Extension") or "").lower(): el.get("ContentType")
+            for el in root.findall(qn("ct:Default"))
+        }
+        checked: set[tuple[str, str]] = set()
+        for section in pkg.section_properties():
+            for kind, expected in HEADER_FOOTER_CONTENT_TYPES.items():
+                for reference in section.findall(qn(f"w:{kind}Reference")):
+                    target = known.get(reference.get(qn("r:id"), ""))
+                    if not target:
+                        continue
+                    part = target.lstrip("/") if target.startswith("/") else normpath(join("word", target))
+                    if (kind, part) in checked:
+                        continue
+                    checked.add((kind, part))
+                    label = "页眉" if kind == "header" else "页脚"
+                    if not pkg.has(part):
+                        report.add_error(f"{label}部件缺失: {part}")
+                        continue
+                    extension = part.rpartition(".")[2].lower()
+                    if overrides.get("/" + part, defaults.get(extension)) != expected:
+                        report.add_error(f"{label}部件的内容类型无效: {part}")
 
     def _check_sections(self, pkg: DocxPackage, report: ValidationReport) -> None:
         sections = pkg.section_properties()

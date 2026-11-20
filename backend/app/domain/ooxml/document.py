@@ -24,6 +24,7 @@ from app.core.constants import layout_rules
 from app.core.errors import LayoutError
 from app.core.logging import get_logger
 from app.core.namespaces import (
+    HEADER_FOOTER_CONTENT_TYPES,
     PART_CONTENT_TYPES,
     PART_DOCUMENT,
     PART_DOCUMENT_RELS,
@@ -270,6 +271,9 @@ class RelationshipRemapper:
 
             data = self.source.read(source_part)
             target_part = self._ensure_target_part(source_part, data)
+            kind = entry.rel_type.rsplit("/", 1)[-1]
+            if kind in HEADER_FOOTER_CONTENT_TYPES and self.base.has(PART_CONTENT_TYPES):
+                self.base.ensure_content_type_override(target_part, HEADER_FOOTER_CONTENT_TYPES[kind])
             relative_target = posixpath.relpath(target_part, "word")
             self._append_rel(base_rels_root, new_id, entry.rel_type, relative_target)
             self.mapping[entry.rel_id] = new_id

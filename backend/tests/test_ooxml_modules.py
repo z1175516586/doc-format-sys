@@ -479,6 +479,59 @@ def test_body_header_aligns_and_footer_line_is_full(tmp_path: Path) -> None:
         assert list(snippet.iter(qn("wp:wrapNone")))
 
 
+def test_landscape_footer_centers_page_field_and_keeps_inherited_portrait_footer(
+    sample_docx: Path,
+) -> None:
+    from docx import Document
+    from docx.enum.section import WD_ORIENT, WD_SECTION_START
+    from docx.shared import Inches
+
+    from app.core.config import get_settings
+    from app.services.template_service import TemplateService
+
+    doc = Document(sample_docx)
+    doc.add_section(WD_SECTION_START.NEW_PAGE)
+    doc.add_paragraph("竖版正文")
+    landscape = doc.add_section(WD_SECTION_START.NEW_PAGE)
+    landscape.orientation = WD_ORIENT.LANDSCAPE
+    landscape.page_width, landscape.page_height = Inches(11.7), Inches(8.3)
+    doc.add_paragraph("横版正文")
+    portrait = doc.add_section(WD_SECTION_START.NEW_PAGE)
+    portrait.orientation = WD_ORIENT.PORTRAIT
+    portrait.page_width, portrait.page_height = Inches(8.3), Inches(11.7)
+    doc.add_paragraph("后续竖版正文")
+    doc.save(sample_docx)
+
+    template = get_settings().resources_dir / "content_template.docx"
+    service = TemplateService()
+    with DocxPackage.open(sample_docx) as pkg:
+        service.apply_body_header(pkg, template, cover_sections=0)
+        _, first, wide, last = pkg.section_properties()
+        tag = qn("w:footerReference")
+        id_attr = qn("r:id")
+        portrait_id = first.find(tag).get(id_attr)
+        wide.remove(wide.find(tag))
+        last.remove(last.find(tag))
+
+        service.polish_header_footer(pkg, cover_sections=0)
+        wide_id = wide.find(tag).get(id_attr)
+        assert wide_id != portrait_id
+        assert last.find(tag).get(id_attr) == portrait_id
+        rels = pkg.xml("word/_rels/document.xml.rels")
+        wide_part = next(rel.get("Target") for rel in rels if rel.get("Id") == wide_id)
+        wide_footer = pkg.xml(f"word/{wide_part}")
+        assert "margin-left:" not in next(wide_footer.iter(qn("v:shape"))).get("style")
+        assert "mso-position-horizontal:center" in next(wide_footer.iter(qn("v:shape"))).get("style")
+        assert "mso-position-horizontal-relative:page" in next(wide_footer.iter(qn("v:shape"))).get("style")
+        assert "margin-left:200pt" in next(pkg.xml("word/footer_body.xml").iter(qn("v:shape"))).get("style")
+        assert "鞍钢集团工程" in "".join(node.text or "" for node in wide_footer.iter(qn("w:t")))
+        assert any("PAGE" in (node.text or "") for node in wide_footer.iter(qn("w:instrText")))
+
+        service.polish_header_footer(pkg, cover_sections=0)
+        assert wide.find(tag).get(id_attr) == wide_id
+        assert len(list(pkg.iter_parts(prefix="word/footer_landscape_", suffix=".xml"))) == 1
+
+
 def test_media_name_collision_renamed_without_user_warning(sample_docx: Path) -> None:
     """模板图标与正文插图同名时必须另存，但不得给用户弹告警。
 
@@ -537,3 +590,30 @@ def test_front_cover_header_footer_cleared(sample_docx: Path) -> None:
             assert spacing.get(qn("w:line")) == "20"
             assert spacing.get(qn("w:before")) == spacing.get(qn("w:after")) == "0"
             assert ppr.find(qn("w:snapToGrid")).get(qn("w:val")) == "0"
+
+
+def test_reused_blank_header_footer_receive_correct_content_types(sample_docx: Path) -> None:
+    from app.core.namespaces import HEADER_FOOTER_CONTENT_TYPES, PART_CONTENT_TYPES
+    from app.domain.ooxml.validate import StructuralValidator
+    from app.services.template_service import TemplateService
+
+    with DocxPackage.open(sample_docx) as pkg:
+        service = TemplateService()
+        service.polish_header_footer(pkg, cover_sections=2)
+        content_types = pkg.xml(PART_CONTENT_TYPES)
+        for entry in content_types.findall(qn("ct:Override")):
+            if entry.get("PartName") == "/word/header_blank.xml":
+                content_types.remove(entry)
+            if entry.get("PartName") == "/word/footer_blank.xml":
+                entry.set("ContentType", "application/xml")
+        pkg.save(sample_docx)
+        errors = StructuralValidator().validate(sample_docx).errors
+        assert any("内容类型无效: word/header_blank.xml" in error for error in errors)
+        assert any("内容类型无效: word/footer_blank.xml" in error for error in errors)
+
+        service.polish_header_footer(pkg, cover_sections=2)
+        overrides = {el.get("PartName"): el.get("ContentType") for el in content_types.findall(qn("ct:Override"))}
+        for kind, expected in HEADER_FOOTER_CONTENT_TYPES.items():
+            assert overrides[f"/word/{kind}_blank.xml"] == expected
+        pkg.save(sample_docx)
+        assert StructuralValidator().validate(sample_docx).ok

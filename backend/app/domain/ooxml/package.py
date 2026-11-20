@@ -21,7 +21,7 @@ from typing import Iterator
 from lxml import etree
 
 from app.core.errors import DocumentCorruptedError
-from app.core.namespaces import NSMAP, PART_DOCUMENT, qn
+from app.core.namespaces import NSMAP, PART_CONTENT_TYPES, PART_DOCUMENT, qn
 
 _XML_PARSER = etree.XMLParser(
     remove_blank_text=False,
@@ -137,6 +137,16 @@ class DocxPackage:
         self._parts[name] = data
         self._xml_cache.pop(name, None)
         self._dirty.discard(name)
+
+    def ensure_content_type_override(self, name: str, content_type: str) -> None:
+        """声明部件的专用类型，并修正已有的错误声明。"""
+        root = self.xml(PART_CONTENT_TYPES)
+        part = "/" + name
+        for override in root.findall(qn("ct:Override")):
+            if override.get("PartName") == part:
+                override.set("ContentType", content_type)
+                return
+        etree.SubElement(root, qn("ct:Override"), PartName=part, ContentType=content_type)
 
     def remove_part(self, name: str) -> bool:
         existed = name in self._parts

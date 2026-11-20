@@ -49,6 +49,11 @@ PART_SETTINGS = "word/settings.xml"
 PART_CONTENT_TYPES = "[Content_Types].xml"
 PART_DOCUMENT_RELS = "word/_rels/document.xml.rels"
 
+HEADER_FOOTER_CONTENT_TYPES = {
+    kind: f"application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}+xml"
+    for kind in ("header", "footer")
+}
+
 
 def qn(tag: str) -> str:
     """把 'w:p' 形式的标签转换为 Clark notation '{ns}p'。
