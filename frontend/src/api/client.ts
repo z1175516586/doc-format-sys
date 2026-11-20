@@ -1,5 +1,5 @@
 import { API } from "../constants/app";
-import type { EngineInfo, HistoryRecord, LineageInspect, ProgressEvent, TaskDetail, TemplateInfo } from "../types";
+import type { DocumentComparison, EngineInfo, HistoryRecord, LineageInspect, ProgressEvent, TaskDetail, TemplateInfo } from "../types";
 
 export class ApiError extends Error {
   constructor(message: string) {
@@ -67,6 +67,14 @@ export async function fetchTask(taskId: string): Promise<TaskDetail> {
     throw new ApiError(await readError(response));
   }
   return response.json() as Promise<TaskDetail>;
+}
+
+export async function fetchComparison(taskId: string, signal: AbortSignal): Promise<DocumentComparison> {
+  const response = await fetch(API.taskComparison(taskId), { signal, cache: "no-store" });
+  if (!response.ok) {
+    throw new ApiError(await readError(response));
+  }
+  return response.json() as Promise<DocumentComparison>;
 }
 
 /** 订阅任务 SSE。空日志是心跳，调用方不用处理。 */

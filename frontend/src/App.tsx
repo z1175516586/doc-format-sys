@@ -22,6 +22,7 @@ import type { UploadFile } from "antd";
 import {
   CircleAlert,
   CircleCheck,
+  Columns2,
   Download,
   FileText,
   GitBranch,
@@ -39,6 +40,7 @@ import {
   subscribeTask,
 } from "./api/client";
 import { AppIcon } from "./components/AppIcon";
+import { DocumentComparisonDialog } from "./components/DocumentComparisonDialog";
 import {
   ACCEPTED_EXTENSIONS,
   API,
@@ -47,6 +49,7 @@ import {
   DOCUMENT_TYPES,
   LINEAGE,
   NOTICES,
+  SHOW_DOCUMENT_COMPARISON,
   STEP_LABELS,
   TOC_PAGE_SOURCE,
   TOC_PAGE_SOURCE_OPTIONS,
@@ -105,6 +108,8 @@ export default function App() {
   const [stepText, setStepText] = useState("");
   const [downloadUrl, setDownloadUrl] = useState("");
   const [outputName, setOutputName] = useState("");
+  const [resultTaskId, setResultTaskId] = useState("");
+  const [comparisonOpen, setComparisonOpen] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   /**
@@ -151,6 +156,8 @@ export default function App() {
     setStepText("");
     setDownloadUrl("");
     setOutputName("");
+    setResultTaskId("");
+    setComparisonOpen(false);
     setWarnings([]);
     setIssues([]);
     setWaiting(false);
@@ -213,6 +220,7 @@ export default function App() {
             setStepText("排版完成");
             setDownloadUrl(event.data?.download_url || API.taskDownload(taskId));
             setOutputName(event.data?.output_name || "排版结果.docx");
+            setResultTaskId(taskId);
           }
         },
         controller.signal,
@@ -224,9 +232,11 @@ export default function App() {
       if (detail.state === "failed") {
         message.error(detail.error?.message || detail.message || "转换失败");
         setDownloadUrl("");
+        setResultTaskId("");
       } else if (detail.download_url) {
         setDownloadUrl(detail.download_url);
         setOutputName(detail.output_name || "排版结果.docx");
+        setResultTaskId(taskId);
       }
       await loadHistory(file);
     } catch (error) {
@@ -295,6 +305,7 @@ export default function App() {
 
               <Upload.Dragger
                 accept={ACCEPTED_EXTENSIONS.join(",")}
+                disabled={running}
                 maxCount={1}
                 fileList={fileList}
                 beforeUpload={(next) => {
@@ -426,6 +437,14 @@ export default function App() {
                           下载转换后的文档
                         </Space>
                       </a>
+                      {SHOW_DOCUMENT_COMPARISON && resultTaskId ? (
+                        <Button
+                          icon={<AppIcon icon={Columns2} />}
+                          onClick={() => setComparisonOpen(true)}
+                        >
+                          查看转换前后对比
+                        </Button>
+                      ) : null}
                       {warnings.map((item) => (
                         <Text key={item} type="warning">
                           {item}
@@ -509,6 +528,13 @@ export default function App() {
           />
         ) : null}
       </Content>
+      {comparisonOpen && resultTaskId ? (
+        <DocumentComparisonDialog
+          key={resultTaskId}
+          taskId={resultTaskId}
+          onClose={() => setComparisonOpen(false)}
+        />
+      ) : null}
     </Layout>
   );
 }

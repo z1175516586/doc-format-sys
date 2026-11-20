@@ -83,6 +83,9 @@ export type TocPageSource = (typeof TOC_PAGE_SOURCE_OPTIONS)[number]["value"];
 /** 默认走客户端计算：不占全局单点，天然支持并发。 */
 export const DEFAULT_TOC_PAGE_SOURCE: TocPageSource = "client";
 
+/** 控制转换成功后的文档对比入口。 */
+export const SHOW_DOCUMENT_COMPARISON = false;
+
 export const API = {
   convert: "/api/v1/documents/convert",
   engines: "/api/v1/engines",
@@ -94,4 +97,5 @@ export const API = {
   taskEvents: (taskId: string) => `/api/v1/tasks/${taskId}/events`,
   task: (taskId: string) => `/api/v1/tasks/${taskId}`,
   taskDownload: (taskId: string) => `/api/v1/tasks/${taskId}/download`,
+  taskComparison: (taskId: string) => `/api/v1/tasks/${taskId}/comparison`,
 } as const;

@@ -85,3 +85,31 @@ export interface TaskDetail {
   download_url: string | null;
   error: { code?: string; message?: string; issues?: ValidationIssue[] } | null;
 }
+export type ComparisonKind = "equal" | "added" | "removed" | "modified" | "style";
+
+export interface ComparisonSide {
+  number: number;
+  text: { text: string; changed: boolean }[];
+}
+
+export interface ComparisonStyle {
+  label: string;
+  before: string;
+  after: string;
+  range_changed: boolean;
+}
+
+export interface ComparisonRow {
+  kind: ComparisonKind;
+  block_type: "paragraph" | "table_row";
+  before: ComparisonSide | null;
+  after: ComparisonSide | null;
+  styles: ComparisonStyle[];
+}
+
+export interface DocumentComparison {
+  source_name: string;
+  output_name: string;
+  rows: ComparisonRow[];
+  counts: Record<ComparisonKind, number>;
+}

@@ -75,6 +75,33 @@ def test_unknown_task_returns_404(api_client) -> None:
     assert response.json()["code"] == "task_not_found"
 
 
+def test_compare_successful_conversion(api_client, sample_docx: Path) -> None:
+    with sample_docx.open("rb") as fp:
+        response = api_client.post("/api/v1/documents/convert", files={"file": (sample_docx.name, fp)})
+    assert response.status_code == 200, response.text
+    task = response.json()
+    assert api_client.get(task["events_url"]).status_code == 200
+
+    response = api_client.get(f"/api/v1/tasks/{task['task_id']}/comparison")
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["source_name"] == sample_docx.name
+    assert result["output_name"].endswith(".docx")
+    assert any(
+        change["label"] == "高亮" and change["after"] == "无"
+        for row in result["rows"]
+        for change in row["styles"]
+    )
+
+
+def test_compare_rejects_unfinished_task(api_client) -> None:
+    from app.services.task_service import task_service
+
+    task = task_service.create("待转换.docx")
+    response = api_client.get(f"/api/v1/tasks/{task.task_id}/comparison")
+    assert response.status_code == 400
+
+
 def test_template_register_and_list(api_client, template_docx: Path) -> None:
     with template_docx.open("rb") as fp:
         created = api_client.post(

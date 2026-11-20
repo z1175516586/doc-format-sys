@@ -169,7 +169,9 @@ async def convert_async(
     history = get_history_service()
     source_hash = history.file_hash(Path(request.source_path))
 
-    task = get_executor().tasks.create(file.filename or "未命名文档")
+    task = get_executor().tasks.create(
+        file.filename or "未命名文档", source_path=request.source_path
+    )
     task.bind_loop(asyncio.get_running_loop())
     get_executor().submit(request, task.task_id, source_hash)
 

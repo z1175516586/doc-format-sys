@@ -42,6 +42,7 @@ class Task:
     message: str = ""
     output_name: str | None = None
     output_path: str | None = None
+    source_path: str | None = None
     created_at: str = field(default_factory=_now)
     finished_at: str | None = None
     steps: list[StepReport] = field(default_factory=list)
@@ -117,8 +118,8 @@ class TaskService:
     # ------------------------------------------------------------------
     # 创建与查询
     # ------------------------------------------------------------------
-    def create(self, source_name: str) -> Task:
-        task = Task(task_id=uuid.uuid4().hex, source_name=source_name)
+    def create(self, source_name: str, *, source_path: str | None = None) -> Task:
+        task = Task(task_id=uuid.uuid4().hex, source_name=source_name, source_path=source_path)
         with self._lock:
             self._tasks[task.task_id] = task
             self._evict_if_needed()

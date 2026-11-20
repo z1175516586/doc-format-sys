@@ -8,8 +8,10 @@ from pathlib import Path
 from fastapi import APIRouter
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.core.errors import NotFoundError
-from app.schemas.task import TaskDetail, TaskSummary
+from app.core.errors import NotFoundError, ValidationError
+from app.domain.ooxml.document_comparison import compare_documents
+from app.schemas.comparison import DocumentComparison
+from app.schemas.task import TaskDetail, TaskState, TaskSummary
 from app.services.task_service import task_service
 
 router = APIRouter()
@@ -68,3 +70,20 @@ def download(task_id: str) -> FileResponse:
         filename=task.output_name or path.name,
         media_type=_DOCX_MEDIA_TYPE,
     )
+
+
+@router.get("/{task_id}/comparison", summary="对比源文档与排版结果")
+def comparison(task_id: str) -> DocumentComparison:
+    task = task_service.get(task_id)
+    if task.state is not TaskState.SUCCEEDED or not task.output_path:
+        raise ValidationError("转换成功后可查看文档对比")
+    if not task.source_path:
+        raise NotFoundError("原始文档不可用，请重新转换")
+    source = Path(task.source_path)
+    output = Path(task.output_path)
+    # .doc 任务打开时已另存为同目录同名的 .docx，作为实际排版前的输入。
+    if source.suffix.lower() == ".doc":
+        source = source.with_suffix(".docx")
+    if not source.is_file() or not output.is_file():
+        raise NotFoundError("原始文档或转换结果已被清理，请重新转换")
+    return compare_documents(source, output, task.source_name, task.output_name or output.name)
