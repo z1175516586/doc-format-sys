@@ -46,6 +46,7 @@ import {
   API,
   APP_TITLE,
   DEFAULT_TOC_PAGE_SOURCE,
+  DOCUMENT_TYPE_FIELD,
   DOCUMENT_TYPES,
   LINEAGE,
   NOTICES,
@@ -68,24 +69,29 @@ function lineageKey(node: LineageNode): string {
 
 function lineageTreeData(node: LineageNode): DataNode {
   const failed = node.kind === "failed";
+  const label = failed ? `${LINEAGE.failed}${node.message ? `：${node.message}` : ""}` : node.name;
   const title = (
-    <Space size={4} wrap>
-      <AppIcon icon={failed ? CircleAlert : FileText} size={14} />
-      <Text strong={node.current} type={failed ? "danger" : undefined}>
-        {failed ? `${LINEAGE.failed}${node.message ? `：${node.message}` : ""}` : node.name}
-      </Text>
-      {node.current ? <Tag color="blue">当前</Tag> : null}
-      {failed ? <Tag color="error">失败</Tag> : null}
-      {node.file_available && node.download_url ? (
-        <a href={node.download_url} onClick={(event) => event.stopPropagation()}>
-          <Space size={2}>
-            <AppIcon icon={Download} size={12} />
-            下载
-          </Space>
-        </a>
-      ) : null}
-      {!failed && !node.file_available ? <Text type="secondary">{node.missing_file_message || LINEAGE.missingFile}</Text> : null}
-    </Space>
+    <div className={node.current ? "lineage-node lineage-node-current" : "lineage-node"} aria-current={node.current || undefined}>
+      <div className="lineage-file-row">
+        <AppIcon icon={failed ? CircleAlert : FileText} size={14} />
+        <Text ellipsis={{ tooltip: label }} strong={node.current} type={failed ? "danger" : undefined} className="lineage-file-name">
+          {label}
+        </Text>
+      </div>
+      <Space size={6} wrap className="lineage-node-meta">
+        {node.current ? <Tag color="blue">{LINEAGE.currentVersion}</Tag> : null}
+        {failed ? <Tag color="error">失败</Tag> : null}
+        {node.file_available && node.download_url ? (
+          <a href={node.download_url} onClick={(event) => event.stopPropagation()}>
+            <Space size={2}>
+              <AppIcon icon={Download} size={12} />
+              下载
+            </Space>
+          </a>
+        ) : null}
+        {!failed && !node.file_available ? <Text type="secondary">{node.missing_file_message || LINEAGE.missingFile}</Text> : null}
+      </Space>
+    </div>
   );
   return {
     key: lineageKey(node),
@@ -137,7 +143,7 @@ export default function App() {
   // 引擎不可用时把已选的服务端方案回落到客户端，避免提交一个注定降级的任务
   useEffect(() => {
     if (serverUnavailable) {
-      setPageSource((current) => (current === "server" ? DEFAULT_TOC_PAGE_SOURCE : current));
+      setPageSource((current) => (current === "server" ? "client" : current));
     }
   }, [serverUnavailable]);
 
@@ -170,7 +176,7 @@ export default function App() {
       return;
     }
     if (!documentType) {
-      message.error("请选择一个排版模板");
+      message.error(DOCUMENT_TYPE_FIELD.placeholder);
       return;
     }
 
@@ -336,13 +342,20 @@ export default function App() {
               </Upload.Dragger>
 
               <Space direction="vertical" size="middle" style={{ width: "100%", marginTop: 16 }}>
-                <Select
-                  style={{ width: "100%" }}
-                  placeholder="选择排版模板"
-                  value={documentType}
-                  options={DOCUMENT_TYPES.map((item) => ({ value: item.value, label: item.label }))}
-                  onChange={setDocumentType}
-                />
+                <div>
+                  <label className="document-field-label" htmlFor="document-type">
+                    {DOCUMENT_TYPE_FIELD.label}
+                  </label>
+                  <Select
+                    id="document-type"
+                    aria-required
+                    style={{ width: "100%" }}
+                    placeholder={DOCUMENT_TYPE_FIELD.placeholder}
+                    value={documentType}
+                    options={DOCUMENT_TYPES.map((item) => ({ value: item.value, label: item.label }))}
+                    onChange={setDocumentType}
+                  />
+                </div>
                 {contentTemplates.length > 0 ? (
                   <Select
                     allowClear
@@ -484,14 +497,15 @@ export default function App() {
                 <Space direction="vertical" size={12} style={{ width: "100%" }}>
                   <div>
                     <Text type="secondary">{LINEAGE.pathTitle}</Text>
-                    <div>
-                      {lineage.path.map((item, index) => (
-                        <span key={lineageKey(item)}>
-                          {index > 0 ? " → " : null}
-                          <Text strong={item.current}>{item.name}</Text>
-                        </span>
+                    <ol className="lineage-path" aria-label={LINEAGE.pathTitle}>
+                      {lineage.path.map((item) => (
+                        <li key={lineageKey(item)} aria-current={item.current ? "step" : undefined}>
+                          <Text className="lineage-file-name" ellipsis={{ tooltip: item.name }} strong={item.current}>
+                            {item.name}
+                          </Text>
+                        </li>
                       ))}
-                    </div>
+                    </ol>
                   </div>
                   {lineage.tree ? (
                     <div>
@@ -501,10 +515,11 @@ export default function App() {
                       </Space>
                       <Tree
                         key={lineage.root_id || lineage.current_node_id || "tree"}
+                        className="lineage-tree"
+                        blockNode
                         showLine
                         defaultExpandAll
                         selectable={false}
-                        selectedKeys={lineage.current_node_id ? [lineage.current_node_id] : []}
                         treeData={[lineageTreeData(lineage.tree)]}
                         titleRender={(item) =>
                           typeof item.title === "function" ? item.title(item) : item.title

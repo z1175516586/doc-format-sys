@@ -13,6 +13,11 @@ export const DOCUMENT_TYPES = [
   { value: 4, label: "可行性研究（代初设）" },
 ] as const;
 
+export const DOCUMENT_TYPE_FIELD = {
+  label: "文档类型（必选）",
+  placeholder: "请选择文档类型",
+} as const;
+
 export const NOTICES = [
   "上传的文档至少包含四部分：封面、设计人员名单、目录和正文",
   "转换后某些空白字符（如空格、制表符）会有适当变化",
@@ -53,7 +58,8 @@ export const LINEAGE = {
   modifiedTitle: "文档内容已改动",
   missingFile: "有记录、文件已删",
   failed: "转换失败",
-  pathTitle: "来时的路",
+  currentVersion: "当前版本",
+  pathTitle: "转换路径",
   treeTitle: "转换树",
 } as const;
 
@@ -64,10 +70,10 @@ export const LINEAGE = {
  */
 export const TOC_PAGE_SOURCE = {
   title: "目录页码计算方式",
-  clientLabel: "打开文档时自动更新（推荐）",
+  clientLabel: "打开文档时自动更新",
   clientHint: "Word / WPS 打开时自动算页码，服务器不占用排版引擎，适合多人同时提交",
-  serverLabel: "服务器端预刷新（LibreOffice）",
-  serverHint: "交付时页码就已写好；LibreOffice 全局只能跑一个，多人提交会自动排队",
+  serverLabel: "服务器端预刷新",
+  serverHint: "交付时页码就已写好；全局只能跑一个，多人提交会自动排队",
   engineUnavailable: "当前机器未检测到 LibreOffice，无法选择服务器端刷新",
   waitingBadge: "排队等待中",
   waitingHint: "前面有任务正在刷新目录页码，请稍候，任务不会丢失",
@@ -80,8 +86,8 @@ export const TOC_PAGE_SOURCE_OPTIONS = [
 
 export type TocPageSource = (typeof TOC_PAGE_SOURCE_OPTIONS)[number]["value"];
 
-/** 默认走客户端计算：不占全局单点，天然支持并发。 */
-export const DEFAULT_TOC_PAGE_SOURCE: TocPageSource = "client";
+/** 默认在服务器端预刷新目录，交付时带页码。 */
+export const DEFAULT_TOC_PAGE_SOURCE: TocPageSource = "server";
 
 /** 控制转换成功后的文档对比入口。 */
 export const SHOW_DOCUMENT_COMPARISON = false;

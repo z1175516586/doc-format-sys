@@ -8,3 +8,62 @@ body,
 body {
   background: #f3f5f8;
 }
+
+.document-field-label {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.lineage-path {
+  margin: 4px 0 0;
+  padding-inline-start: 20px;
+}
+
+.lineage-path > li[aria-current="step"] {
+  color: #14324f;
+}
+
+.lineage-path .lineage-file-name {
+  display: block;
+  max-width: 100%;
+}
+
+.lineage-tree .ant-tree-node-content-wrapper {
+  min-width: 0;
+  padding-inline: 0;
+}
+
+.lineage-node {
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+.lineage-node-current {
+  background: #eaf2fb;
+  box-shadow: inset 2px 0 #255d91;
+}
+
+.lineage-file-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.lineage-file-row > svg {
+  flex: 0 0 auto;
+}
+
+.lineage-file-row .lineage-file-name {
+  min-width: 0;
+}
+
+.lineage-node-meta {
+  margin-inline-start: 18px;
+  font-size: 12px;
+}
+
+.lineage-node-meta .ant-tag {
+  margin-inline-end: 0;
+}
