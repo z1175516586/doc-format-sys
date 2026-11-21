@@ -49,6 +49,7 @@ _RELOCATABLE_TYPES = (
     "footer",
     "footnotes",
     "endnotes",
+    "oleObject",
     "hyperlink",
 )
 
@@ -274,6 +275,10 @@ class RelationshipRemapper:
             kind = entry.rel_type.rsplit("/", 1)[-1]
             if kind in HEADER_FOOTER_CONTENT_TYPES and self.base.has(PART_CONTENT_TYPES):
                 self.base.ensure_content_type_override(target_part, HEADER_FOOTER_CONTENT_TYPES[kind])
+            elif kind == "oleObject" and self.base.has(PART_CONTENT_TYPES):
+                self.base.ensure_content_type_override(
+                    target_part, "application/vnd.openxmlformats-officedocument.oleObject"
+                )
             relative_target = posixpath.relpath(target_part, "word")
             self._append_rel(base_rels_root, new_id, entry.rel_type, relative_target)
             self.mapping[entry.rel_id] = new_id

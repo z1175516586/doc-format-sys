@@ -550,6 +550,32 @@ def test_media_name_collision_renamed_without_user_warning(sample_docx: Path) ->
         assert pkg.read("word/media/collide.png") == b"body-image", "正文插图被覆盖"
 
 
+def test_merge_preserves_embedded_ole_relationship(sample_docx: Path, template_docx: Path) -> None:
+    with DocxPackage.open(template_docx) as base, DocxPackage.open(sample_docx) as source:
+        rels = source.xml("word/_rels/document.xml.rels")
+        rel_id = "rIdTestOle"
+        etree.SubElement(rels, qn("pr:Relationship"), Id=rel_id,
+                         Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject",
+                         Target="embeddings/oleObject1.bin")
+        source.add_part("word/embeddings/oleObject1.bin", b"test OLE part")
+        obj = etree.SubElement(source.paragraphs()[-1], qn("w:object"))
+        etree.SubElement(obj, qn("o:OLEObject"), {qn("r:id"): rel_id})
+
+        DocumentMerger(base).append(source)
+
+        imported = next(base.body.iter(qn("o:OLEObject")))
+        new_id = imported.get(qn("r:id"))
+        relationship = next(rel for rel in base.xml("word/_rels/document.xml.rels") if rel.get("Id") == new_id)
+        part = "word/" + relationship.get("Target")
+        assert base.read(part) == b"test OLE part"
+        content_types = base.xml("[Content_Types].xml")
+        assert any(
+            item.get("PartName") == "/" + part
+            and item.get("ContentType") == "application/vnd.openxmlformats-officedocument.oleObject"
+            for item in content_types
+        )
+
+
 def test_front_cover_header_footer_cleared(sample_docx: Path) -> None:
     from docx import Document
 

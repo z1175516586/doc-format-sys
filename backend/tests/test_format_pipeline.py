@@ -70,6 +70,44 @@ def test_cover_keeps_blank_subtitle_line_on_both_pages(sample_docx: Path, tmp_pa
             )
 
 
+def test_cover_extracts_personnel_table_into_template_paragraphs(
+    sample_docx: Path, tmp_path: Path
+) -> None:
+    from docx import Document
+
+    from app.domain.ooxml.cover import CoverMetadataExtractor
+
+    doc = Document(sample_docx)
+    marker = next(p for p in doc.paragraphs if p.text == "设计人员名单")
+    cover_table = doc.add_table(rows=3, cols=2)
+    rows = [("主 管 领 导", "：张 三"), ("事 业 部 经 理", "李四"), ("总设计师", "：王 五")]
+    for row, texts in zip(cover_table.rows, rows, strict=True):
+        for cell, text in zip(row.cells, texts, strict=True):
+            cell.text = text
+    marker._p.addprevious(cover_table._tbl)
+    roster = doc.add_table(rows=1, cols=1)
+    roster.cell(0, 0).text = "设计人员名单表"
+    marker._p.addnext(roster._tbl)
+    doc.save(sample_docx)
+
+    with DocxPackage.open(sample_docx) as pkg:
+        assert CoverMetadataExtractor(pkg).extract().personnel == [
+            ("主管领导", "张三"), ("事业部经理", "李四"), ("总设计师", "王五"),
+        ]
+    success, output, result = _run(sample_docx, tmp_path / "out.docx", use_cover_template=True)
+    assert success, result.message
+    with DocxPackage.open(output) as pkg:
+        personnel = [p for p in pkg.paragraphs() if paragraph_text(p) in {
+            "主管领导：张三", "事业部经理：李四", "总设计师：王五",
+        }]
+        assert len(personnel) == 3
+        assert all(p.xpath("./w:r/w:rPr/w:spacing", namespaces=NSMAP) for p in personnel)
+        table_texts = ["".join(t.itertext()) for t in pkg.tables()]
+        assert len(table_texts) == 2
+        assert "设计人员名单表" in table_texts[0]
+        assert "正文表格" in table_texts[1]
+
+
 def test_cross_chapter_jump_blocks_conversion_even_with_many_warnings(
     sample_docx: Path, tmp_path: Path
 ) -> None:

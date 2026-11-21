@@ -19,8 +19,10 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Iterator
+from unicodedata import east_asian_width
 
 from lxml import etree
 
@@ -89,19 +91,18 @@ def iter_personnel_lines(
     职务命中关键词即视为人员行（用于源封面与模板封面两侧的定位）。
     """
     for paragraph in paragraphs:
-        text = paragraph_text(paragraph)
-        if not text:
-            continue
-        parts = re.split(r"[:：]", text, maxsplit=1)
-        if len(parts) != 2:
-            continue
-        role = _compact(parts[0])
-        if not any(keyword in role for keyword in role_keywords):
-            continue
-        name = _compact(parts[1])
-        if not name:
-            continue
-        yield paragraph, role, name
+        if (person := _parse_personnel(paragraph_text(paragraph), role_keywords)) and person[1]:
+            yield paragraph, *person
+
+
+def _parse_personnel(text: str, role_keywords: tuple[str, ...]) -> tuple[str, str] | None:
+    parts = re.split(r"[:：]", text, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    role, name = _compact(parts[0]), parts[1].strip()
+    if any(keyword in role for keyword in role_keywords):
+        return role, name
+    return None
 
 
 # ----------------------------------------------------------------------
@@ -145,7 +146,7 @@ class CoverMetadataExtractor:
     # ------------------------------------------------------------------
     def extract(self) -> CoverMetadata:
         texts = self._cover_paragraph_texts()
-        meta = CoverMetadata()
+        meta = CoverMetadata(personnel=self._extract_personnel())
 
         for text in texts:
             if not text:
@@ -161,10 +162,6 @@ class CoverMetadataExtractor:
             if not meta.date_text:
                 meta.date_text = self._pick_date(text)
 
-            if self._is_personnel(text):
-                meta.personnel.append(self._split_personnel(text))
-                continue
-
         layout = self.locate_front_page()
         if layout.type_id is not None and layout.title_lines:
             project, company = self._split_title(layout.title_lines)
@@ -174,6 +171,42 @@ class CoverMetadataExtractor:
             meta.project_name = self._join_company(project, company)
 
         return meta
+
+    def _extract_personnel(self) -> list[tuple[str, str]]:
+        """只读设计人员名单之前的封面，将表格每行的职务与姓名合起来。"""
+        personnel = []
+        for element in self.pkg.body:
+            if element.tag == qn("w:p"):
+                text = paragraph_text(element)
+                if self.marker in _compact(text):
+                    break
+                lines = [text]
+            elif element.tag == qn("w:tbl"):
+                lines = []
+                for row in element.findall(qn("w:tr")):
+                    paragraphs = [paragraph_text(p) for p in row.iter(qn("w:p"))]
+                    if any(
+                        (person := _parse_personnel(text, self.role_keywords)) and person[1]
+                        for text in paragraphs
+                    ):
+                        lines.extend(paragraphs)
+                        continue
+                    cells = [
+                        text for cell in row.findall(qn("w:tc")) if (text := element_text(cell))
+                    ]
+                    combined = "".join(cells)
+                    if len(cells) == 2 and not re.search(r"[:：]", combined):
+                        combined = "：".join(cells)
+                    lines.append(combined)
+            else:
+                continue
+            for line in lines:
+                if any(keyword in line for keyword in self.skip_keywords):
+                    continue
+                if (person := _parse_personnel(line, self.role_keywords)) is not None:
+                    role, name = person
+                    personnel.append((role, _compact(name)))
+        return personnel
 
     # ------------------------------------------------------------------
     # 封面第一页定位（校验与取项目名共用）
@@ -355,13 +388,6 @@ class CoverMetadataExtractor:
         role = _compact(parts[0])
         return any(keyword in role for keyword in self.role_keywords)
 
-    @staticmethod
-    def _split_personnel(text: str) -> tuple[str, str]:
-        parts = re.split(r"[:：]", text, maxsplit=1)
-        role = _compact(parts[0])
-        name = _compact(parts[1]) if len(parts) > 1 else ""
-        return role, name
-
     def _locate_title(self, texts: list[str]) -> tuple[str, str]:
         """用文档类型（初步设计 / 可行性研究）当锚点，往上取标题区。
 
@@ -518,15 +544,70 @@ class CoverProcessor:
         职务以原稿为准（例如模板写"副总工程师"，原稿是"事业部总经理"）。
         """
         slots = list(iter_personnel_lines(self.pkg.paragraphs(), self.role_keywords))
-        replaced = 0
-        for index, (paragraph, _role, _name) in enumerate(slots):
-            if index < len(personnel):
-                role, name = personnel[index]
-                self._set_paragraph_text(paragraph, f"{role}：{name}")
-                replaced += 1
-            else:
+        replacements = personnel[: len(slots)]
+        if not replacements:
+            for paragraph, _, _ in slots:
                 self._set_paragraph_text(paragraph, "")
-        return replaced
+            return 0
+
+        # 模板靠居中的等宽文字块对齐，不用整页的两端对齐。
+        # 从占位内容推导职务列和姓名列的宽度，较长的实际内容可扩展文字块。
+        width_samples = [(role, name) for _, role, name in slots] + replacements
+        role_columns = max(_east_asian_columns(role) for role, _ in width_samples)
+        name_columns = max(_east_asian_columns(name) for _, name in width_samples)
+        for (paragraph, _, _), (role, name) in zip(slots, replacements):
+            self._write_personnel_line(paragraph, role, name, role_columns, name_columns)
+        for paragraph, _, _ in slots[len(replacements) :]:
+            self._set_paragraph_text(paragraph, "")
+        return len(replacements)
+
+    @classmethod
+    def _write_personnel_line(
+        cls, paragraph: etree._Element, role: str, name: str, role_columns: int, name_columns: int
+    ) -> None:
+        nodes = cls._text_nodes(paragraph)
+        if not nodes:
+            return
+        role_run, name_run = nodes[0].getparent(), nodes[-1].getparent()
+        role_style = role_run.find(qn("w:rPr"))
+        name_style = name_run.find(qn("w:rPr"))
+        size = paragraph.find(f"{qn('w:pPr')}/{qn('w:rPr')}/{qn('w:sz')}")
+        if size is None and role_style is not None:
+            size = role_style.find(qn("w:sz"))
+        if size is None or not (size_value := size.get(w_attr("val"), "")).isdigit():
+            cls._set_paragraph_text(paragraph, f"{role}：{name}")
+            return
+        # 此封面使用的中文字体在 Word 中按两倍 w:spacing 扩展字距。
+        # w:sz 为半磅，半个字号的实际宽度折合为 w:spacing 单位时再除以二。
+        column_spacing = int(size_value) * 2.5
+        role_spacing = round((role_columns - _east_asian_columns(role)) * column_spacing / len(role))
+        name_extra = (name_columns - _east_asian_columns(name)) * column_spacing
+        for node in nodes:
+            node.text = ""
+
+        colon_spacing = round(name_extra) if len(name) <= 1 else 0
+        runs = [(role, role_style, role_spacing), ("：", role_style, colon_spacing)]
+        if len(name) > 1 and name_extra:
+            runs.append((name[:-1], name_style, round(name_extra / (len(name) - 1))))
+            runs.append((name[-1], name_style, 0))
+        else:
+            runs.append((name, name_style, 0))
+        for text, style, spacing in runs:
+            run = etree.Element(qn("w:r"))
+            properties = deepcopy(style) if style is not None else etree.Element(qn("w:rPr"))
+            letter_spacing = properties.find(qn("w:spacing"))
+            if letter_spacing is not None:
+                properties.remove(letter_spacing)
+            if spacing:
+                letter_spacing = etree.Element(qn("w:spacing"), {w_attr("val"): str(spacing)})
+                font_size = properties.find(qn("w:sz"))
+                if font_size is None:
+                    properties.append(letter_spacing)
+                else:
+                    font_size.addprevious(letter_spacing)
+            run.append(properties)
+            etree.SubElement(run, qn("w:t")).text = text
+            role_run.addprevious(run)
 
     # ------------------------------------------------------------------
     def _all_paragraphs(self) -> list[etree._Element]:
@@ -774,6 +855,10 @@ def _font_run(text: str, east_asia: str, ascii_font: str, size: str, *, bold: bo
     text_node.set(qn("xml:space"), "preserve")
     text_node.text = text
     return run
+
+
+def _east_asian_columns(text: str) -> int:
+    return sum(2 if east_asian_width(char) in ("W", "F") else 1 for char in text)
 
 
 def _ends_page(paragraph: etree._Element) -> bool:
